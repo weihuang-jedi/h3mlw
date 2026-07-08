@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+# default setting
+EAGLEhome=/scratch5/purged/Wei.Huang/src/EAGLE
+
+source ${EAGLEhome}/conda/etc/profile.d/conda.sh
+
+eval "$(mamba shell hook --shell bash)"
+
+mamba activate anemoi
