@@ -9,10 +9,12 @@ paths:
 model_params:
   history_steps: 2
   forecast_offset: 1
- #static_features: 2       # Added tracking parameters: land_sea_mask, elevation
-  learning_rate: 0.0005   # GAT architectures train better with a slightly smaller learning rate
-  hidden_channels: 32     # Base channel width
-  attention_heads: 4      # Number of multi-head attention components
+ #static_features: 2       # land_sea_mask, elevation
+  solar_features: 4        # diurnal_sin, diurnal_cos, annual_sin, annual_cos
+  forecast_offset: 1
+  learning_rate: 0.0005
+  hidden_channels: 32
+  attention_heads: 4
 
 training_params:
   batch_size: 4

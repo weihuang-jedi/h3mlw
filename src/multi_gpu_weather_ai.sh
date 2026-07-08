@@ -19,10 +19,14 @@ source ${EAGLEhome}/conda/etc/profile.d/conda.sh
 eval "$(mamba shell hook --shell bash)"
 mamba activate anemoi
 
-# Ensure output streams log in real-time without print buffering lags
+# Set environment variables to optimize distributed scaling performance
+export NCCL_DEBUG=INFO
+export NCCL_IB_DISABLE=0              # Set to 0 to enable InfiniBand inter-node communication
 export PYTHONUNBUFFERED=1
 
-echo "Launching Single-GPU training run on node: $SLURMD_NODENAME"
+# Retrieve the master node's network IP address to coordinate the worker pool
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500              # Port communication channel
 
 # Step 1: Create the Configuration File (config.yaml)
 
@@ -30,9 +34,9 @@ echo "Launching Single-GPU training run on node: $SLURMD_NODENAME"
 #python build_graph.py
 
 # Step 3: Create the Complete PyTorch Training Pipeline (train_distributed.py)
-python train_single_gpu.py
+#srun python -u ./train_distributed.py
 
-# nvidia-smi -l 1
+python train_single_gpu.py
 
 #echo "Launching training job. Master node address is: $MASTER_ADDR"
 

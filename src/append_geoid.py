@@ -2,15 +2,18 @@ import xarray as xr
 import numpy as np
 
 print("Opening master H3 time-series file...")
-ds_h3 = xr.open_dataset("global_h3_res2_air_all_times.nc")
+ds_h3 = xr.open_dataset("../data/global_h3_res2_air_all_times.nc")
 num_nodes = len(ds_h3.h3_index)
 
 # 1. OPTION A: Derive a land mask from your existing air temperature reanalysis file
 # Since your original 20CRv2c dataset already knows land boundaries, we use its grid mask
 print("Loading weather dataset mask properties...")
-ds_air = xr.open_dataset("air.sfc.2000.nc")
+ds_air = xr.open_dataset("../data/air.sfc.2000.nc")
 air_slice = ds_air['air'].isel(time=0).drop_vars('time', errors='ignore')
-if air_slice.lat.values > air_slice.lat.values[-1]:
+#if air_slice.lat.values > air_slice.lat.values[-1]:
+#    air_slice = air_slice.sortby('lat')
+# FIX: Check only the first scalar element to detect descending order safely
+if air_slice.lat.values[0] > air_slice.lat.values[-1]:
     air_slice = air_slice.sortby('lat')
 
 # Calculate which cells contain valid entries vs land missing masks
@@ -22,7 +25,7 @@ raw_land_mask = xr.where(~np.isnan(air_slice), 1.0, 0.0)
 # If unavailable, we generate safe dummy elevation arrays matching the land profile.
 try:
     print("Loading global digital elevation model file...")
-    ds_etopo = xr.open_dataset("etopo1_or_2022.nc") # Standard NOAA ETOPO relief file
+    ds_etopo = xr.open_dataset("../data/ETOPO_2022_v1_60s_N90W180_bed.nc") # Standard NOAA ETOPO relief file
     has_etopo = True
 except FileNotFoundError:
     print("Notice: External elevation file not found. Generating default topographical array...")
@@ -43,8 +46,9 @@ node_land_mask = raw_land_mask.interp(lon=target_lon, lat=target_lat, method="ne
 node_land_mask = np.where(node_land_mask > 0.5, 1.0, 0.0)
 
 if has_etopo:
-    # Interpolate exact elevation metrics from ETOPO grid coordinates
-    node_elevation = ds_etopo['elevation'].interp(lon=target_lon, lat=target_lat, method="linear").values
+    # PATCH: Read the correct variable name 'z' from your ETOPO file
+    print("Interpolating topographical height maps using variable 'z'...")
+    node_elevation = ds_etopo['z'].interp(lon=target_lon, lat=target_lat, method="linear").values
 else:
     # Fallback approximation: assign 500m to land nodes and 0m to ocean nodes
     node_elevation = np.where(node_land_mask == 1.0, 500.0, 0.0)
