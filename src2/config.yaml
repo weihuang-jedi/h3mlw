@@ -1,0 +1,22 @@
+paths:
+  # Path to your master 3D time-series NetCDF file
+  data_nc: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/data/global_h3_res2_air_all_times.nc"
+  # Destination where the generated graph topology matrix is saved/read
+  edge_index_pt: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/data/h3_edge_index.pt"
+  # Directory where model weights and checkpoints will be saved
+  checkpoint_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/data/checkpoints/"
+
+model_params:
+  history_steps: 2
+  forecast_offset: 1
+ #static_features: 2       # Added tracking parameters: land_sea_mask, elevation
+  learning_rate: 0.0005   # GAT architectures train better with a slightly smaller learning rate
+  hidden_channels: 32     # Base channel width
+  attention_heads: 4      # Number of multi-head attention components
+
+training_params:
+  batch_size: 4
+  num_workers: 8
+  max_epochs: 20
+  num_nodes: 2
+

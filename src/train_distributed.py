@@ -1,3 +1,4 @@
+import yaml
 import xarray as xr
 import numpy as np
 import torch
@@ -9,16 +10,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.strategies import DDPStrategy
 
 # =====================================================================
-# 1. PYTORCH DATASET SYSTEM
+# A. CONFIG-DRIVEN PYTORCH DATASET
 # =====================================================================
 class GlobalH3WeatherDataset(Dataset):
-    def __init__(self, nc_path="global_h3_res2_air_all_times.nc", history_steps=2, forecast_offset=1):
-        """
-        Args:
-            nc_path: Path to your generated time-series NetCDF.
-            history_steps: Number of past time steps to feed into the model (e.g., 2 frames = 6 hours).
-            forecast_offset: How many steps ahead to predict (e.g., 1 step = +3 hours).
-        """
+    def __init__(self, nc_path, history_steps, forecast_offset):
         self.ds = xr.open_dataset(nc_path)
         # Pull values array directly into RAM as a float32 tensor
         self.data = torch.tensor(self.ds['air_h3'].values, dtype=torch.float32)
@@ -30,42 +25,35 @@ class GlobalH3WeatherDataset(Dataset):
         
         self.history_steps = history_steps
         self.forecast_offset = forecast_offset
-        
-        # Total valid sequences available to sample
         self.total_samples = len(self.data) - self.history_steps - self.forecast_offset + 1
 
     def __len__(self):
         return self.total_samples
 
     def __getitem__(self, idx):
-        # Extract past sequence frames: shape (history_steps, num_nodes)
         history_end = idx + self.history_steps
         x = self.normalized_data[idx:history_end]
+        x = x.t()  # Transpose shape from (history_steps, num_nodes) to (num_nodes, history_steps)
         
-        # Transpose (history_steps, num_nodes) into (num_nodes, history_steps)
-        x = x.t() 
-        
-        # Extract target variable slice to evaluate predictions against
         target_idx = history_end + self.forecast_offset - 1
-        y = self.normalized_data[target_idx] # Shape: (num_nodes,)
-        
+        y = self.normalized_data[target_idx]  # Shape: (num_nodes,)
         return x, y
 
 # =====================================================================
-# 2. PYTORCH LIGHTNING DATAMODULE SYSTEM
+# B. CONFIG-DRIVEN LIGHTNING DATAMODULE
 # =====================================================================
 class H3DataModule(pl.LightningDataModule):
-    def __init__(self, nc_path="global_h3_res2_air_all_times.nc", batch_size=4, num_workers=8):
+    def __init__(self, config):
         super().__init__()
-        self.nc_path = nc_path
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.cfg = config
 
     def setup(self, stage=None):
-        # Load the dataset sequence
-        full_dataset = GlobalH3WeatherDataset(self.nc_path)
-        
-        # Group time steps into clean, isolated sets (80% train, 10% val, 10% test)
+        full_dataset = GlobalH3WeatherDataset(
+            nc_path=self.cfg['paths']['data_nc'],
+            history_steps=self.cfg['model_params']['history_steps'],
+            forecast_offset=self.cfg['model_params']['forecast_offset']
+        )
+        # Split into training (80%), validation (10%), and testing (10%) sets
         total = len(full_dataset)
         train_sz = int(total * 0.8)
         val_sz = int(total * 0.1)
@@ -76,49 +64,47 @@ class H3DataModule(pl.LightningDataModule):
         )
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, 
-                          num_workers=self.num_workers, pin_memory=True, drop_last=True)
+        return DataLoader(self.train_dataset, batch_size=self.cfg['training_params']['batch_size'], 
+                          shuffle=True, num_workers=self.cfg['training_params']['num_workers'], 
+                          pin_memory=True, drop_last=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, 
-                          num_workers=self.num_workers, pin_memory=True)
-
-    def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, 
-                          num_workers=self.num_workers)
+        return DataLoader(self.val_dataset, batch_size=self.cfg['training_params']['batch_size'], 
+                          shuffle=False, num_workers=self.cfg['training_params']['num_workers'], 
+                          pin_memory=True)
 
 # =====================================================================
-# 3. DISTRIBUTED PYTORCH GEOMETRIC GRAPH NN MODEL
+# C. CONFIG-DRIVEN DISTRIBUTED GRAPH NEURAL NETWORK
 # =====================================================================
 class DistributedH3WeatherGCN(pl.LightningModule):
-    def __init__(self, history_steps=2, learning_rate=1e-3):
+    def __init__(self, config):
         super().__init__()
         self.save_hyperparameters()
-        self.lr = learning_rate
+        self.cfg = config
         
-        # Load the adjacency tensor setup generated in step 1
-        edge_index = torch.load("h3_edge_index.pt", map_location="cpu")
+        # Load the graph topology using the path specified in the configuration
+        edge_index = torch.load(self.cfg['paths']['edge_index_pt'], map_location="cpu")
         self.register_buffer("edge_index", edge_index)
         
-        # Network Layers
-        self.conv1 = GCNConv(in_channels=history_steps, out_channels=64)
+        # Build GNN architecture using configuration parameters
+        h_steps = self.cfg['model_params']['history_steps']
+        h_channels = self.cfg['model_params']['hidden_channels']
+        
+        self.conv1 = GCNConv(in_channels=h_steps, out_channels=h_channels)
         self.relu = nn.ReLU()
-        self.conv2 = GCNConv(in_channels=64, out_channels=32)
-        self.linear = nn.Linear(32, 1)
+        self.conv2 = GCNConv(in_channels=h_channels, out_channels=int(h_channels / 2))
+        self.linear = nn.Linear(int(h_channels / 2), 1)
         
         self.loss_fn = nn.MSELoss()
 
     def forward(self, x):
         batch_size, num_nodes, features = x.shape
-        
-        # Flatten batch into a single large contiguous graph block
         x_flat = x.view(-1, features)
         
-        # Compute batch offsets cleanly using matrix math to optimize VRAM
-        offsets = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index.shape[1]) * num_nodes
+        # Efficiently compute distributed edge indices using matrix math
+        offsets = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index.shape) * num_nodes
         edge_index_batched = self.edge_index.repeat(1, batch_size) + offsets
         
-        # Run local message passing
         h = self.conv1(x_flat, edge_index_batched)
         h = self.relu(h)
         h = self.conv2(h, edge_index_batched)
@@ -141,17 +127,20 @@ class DistributedH3WeatherGCN(pl.LightningModule):
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        return torch.optim.AdamW(self.parameters(), lr=self.cfg['model_params']['learning_rate'], weight_decay=1e-4)
 
 # =====================================================================
-# 4. DISTRIBUTED EXECUTION TRAINING ENGINE
+# D. ENTRY EXECUTION BLOCK
 # =====================================================================
-def run_distributed_training():
-    # Configure parameters. Batch size 4 means 4 historical frames per GPU worker per optimization step
-    datamodule = H3DataModule(nc_path="global_h3_res2_air_all_times.nc", batch_size=4, num_workers=8)
-    model = DistributedH3WeatherGCN(history_steps=2, learning_rate=1e-3)
+def main():
+    print("Reading master system config file...")
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+        
+    datamodule = H3DataModule(config)
+    model = DistributedH3WeatherGCN(config)
     
-    # Configure DDP Strategy Settings for high-speed inter-node synchronization
+    # Configure the high-speed multi-GPU / multi-node strategy backend
     ddp_strategy = DDPStrategy(
         process_group_backend="nccl", 
         find_unused_parameters=False, 
@@ -160,27 +149,26 @@ def run_distributed_training():
     
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
-        dirpath="checkpoints/",
-        filename="distributed-h3-weather-model",
+        dirpath=config['paths']['checkpoint_dir'],
+        filename="best-h3-weather-model",
         save_top_k=1,
         mode="min"
     )
     
-    # Configure Trainer flags. Set num_nodes to match your Slurm allocation
     trainer = pl.Trainer(
-        max_epochs=20,
+        max_epochs=config['training_params']['max_epochs'],
         accelerator="gpu",
         devices="auto",           
-        num_nodes=2,              # Change this to match your total physical compute nodes allocation pool
+        num_nodes=config['training_params']['num_nodes'],
         strategy=ddp_strategy,     
         callbacks=[checkpoint_callback],
-        precision="16-mixed",     # Mixed precision enables floating point tensor hardware acceleration
+        precision="16-mixed",     
         log_every_n_steps=10
     )
     
-    print("Beginning Training Run on Distributed Cluster Topology...")
+    print("Launching Distributed Training Run Engine...")
     trainer.fit(model, datamodule=datamodule)
 
 if __name__ == "__main__":
-    run_distributed_training()
+    main()
 
