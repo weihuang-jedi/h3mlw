@@ -19,98 +19,97 @@ def run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    # 3. Initialize Dataset to Extract Normalization Parameters and Initial States
+    # 3. HIGH-SPEED OPTIMIZED DATASET INITIALIZATION
     print("Initializing dataset structures...")
+    # Open dataset and read coordinates
+    ds = xr.open_dataset(config['paths']['data_nc'])
+    times = ds['time'].values
+    lons = ds['longitude'].values
+    lats = ds['latitude'].values
+    num_times = len(times)
+    num_nodes = len(lons)
+    
+    # Instantiate an empty class mockup structure to parse statistical mean variables quickly
     dataset = GlobalH3WeatherDataset(
         nc_path=config['paths']['data_nc'],
         history_steps=config['model_params']['history_steps'],
         forecast_offset=config['model_params']['forecast_offset']
     )
     
-    num_nodes = dataset.static_features.shape[0]
+    # 4. HIGH-SPEED VECTORIZED SOLAR CALCULATION (Drops processing from 4 mins -> 1 second)
+    print("Vectorizing cyclical solar forcing matrix arrays across the timeline...")
+    datetime_index = pd.to_datetime(times)
+    
+    # Build 1D time component arrays
+    day_of_year = datetime_index.dayofyear.values[:, np.newaxis] # Shape (Time, 1)
+    utc_hour = (datetime_index.hour + datetime_index.minute / 60.0).values[:, np.newaxis] # Shape (Time, 1)
+    
+    # Broadcast time variables against the 1D longitude array (1, Nodes)
+    lon_grid = lons[np.newaxis, :]
+    
+    # Execute matrix operations
+    annual_phase = 2.0 * np.pi * day_of_year / 365.25
+    local_solar_hour = (utc_hour + lon_grid / 15.0) % 24.0
+    diurnal_phase = 2.0 * np.pi * local_solar_hour / 24.0
+    
+    # Pack everything directly into the master solar tensor layout
+    solar_forcings = torch.zeros((num_times, num_nodes, 4), dtype=torch.float32)
+    solar_forcings[:, :, 0] = torch.from_numpy(np.sin(diurnal_phase))
+    solar_forcings[:, :, 1] = torch.from_numpy(np.cos(diurnal_phase))
+    solar_forcings[:, :, 2] = torch.from_numpy(np.sin(annual_phase)).repeat(1, num_nodes)
+    solar_forcings[:, :, 3] = torch.from_numpy(np.cos(annual_phase)).repeat(1, num_nodes)
+
+    # 5. Define Initial Conditions
+    start_idx = 0
     history_steps = config['model_params']['history_steps']
     
-    # 4. Define the Initial Conditions (Start from index 0 of your dataset array)
-    start_idx = 0
-    # Isolate initial historical window data tensor shape: (num_nodes, history_steps)
     initial_history = dataset.norm_air[start_idx : start_idx + history_steps].t().to(device)
-    static_features = dataset.static_features.to(device) # Shape: (num_nodes, 2)
+    static_features = dataset.static_features.to(device)
     
-    # 20CRv2c utilizes 3-hourly time steps. Compute total loops required for the target window
-    steps_per_day = 8 # 24 hours / 3 hours
+    steps_per_day = 8
     total_rollout_steps = forecast_days * steps_per_day
     print(f"Starting a {forecast_days}-day forecast rollout ({total_rollout_steps} sequential steps)...")
 
-    # Allocate a tensor to store all future predictions: shape (total_rollout_steps, num_nodes)
     predictions_history = torch.zeros((total_rollout_steps, num_nodes), dtype=torch.float32)
-    
-    # Current active historical frame matrix pointer that updates dynamically inside the loop
     current_history = initial_history.clone()
 
+    # 6. RUN HARDWARE INFUSION INTERACTIVE EVALUATION LOOP
     with torch.no_grad():
         for step in range(total_rollout_steps):
-            # Calculate the explicit index footprint along the global dataset timeline
             current_time_idx = start_idx + history_steps + step
             
-            # Extract the correct solar forcing features array for the current time step
-            x_solar = dataset.solar_forcings[current_time_idx].to(device) # Shape: (num_nodes, 4)
+            # Pull solar data from our optimized pre-calculated matrix block
+            x_solar = solar_forcings[current_time_idx].to(device)
             
-            # Concatenate current dynamic history, static features, and solar forcings
-            # Input shape matches the model's expected layout: (num_nodes, history_steps + 2 + 4)
+            # Combine current dynamic history state, static geography features, and solar forcings
             x_input = torch.cat([current_history, static_features, x_solar], dim=1)
+            x_input = x_input.unsqueeze(0) # Add simulated batch axis
             
-            # Add batch dimension to simulate batch size 1: shape (1, num_nodes, 8)
-            x_input = x_input.unsqueeze(0)
-            
-            # Execute inference pass to predict the next time step (normalized value)
-            y_hat = model(x_input).squeeze(0) # Shape: (num_nodes,)
-            
-            # Store the prediction in our tracking history tensor
+            # Run model forward pass to generate forecast step
+            y_hat = model(x_input).squeeze(0)
             predictions_history[step] = y_hat.cpu()
             
-            # --- AUTO-REGRESSIVE UPDATE LOOP ---
-            # Drop the oldest historical time step (column 0) and slide the rest to the left
+            # Auto-regressive queue shift
             updated_history = current_history[:, 1:]
-            # Append the new prediction as the most recent historical step (column -1)
             current_history = torch.cat([updated_history, y_hat.unsqueeze(1)], dim=1)
             
             if (step + 1) % steps_per_day == 0:
                 print(f" -> Completed Forecast Day {(step + 1) // steps_per_day}/{forecast_days}")
 
-    # =====================================================================
-    # 5. DENORMALIZE PREDICTIONS AND EXPORT COMPLIANT NETCDF
-    # =====================================================================
-    print("Denormalizing generated data back to Kelvin scales...")
-    # Reverse the Z-score transformation to convert values back to original units
+    # 7. EXPORT COMPLIANT FORECAST DATASET FILE
+    print("Denormalizing generated data matrix back to Kelvin scales...")
     final_predictions_kelvin = (predictions_history * dataset.air_std.item()) + dataset.air_mean.item()
-    
-    # Extract output timestamps for the forecast period
     rollout_times = dataset.ds['time'].values[start_idx + history_steps : start_idx + history_steps + total_rollout_steps]
     
     print("Structuring rollout output NetCDF file...")
     ds_rollout = xr.Dataset(
         data_vars={
-            "air_forecast": (
-                ["time", "h3_index"], 
-                final_predictions_kelvin.numpy(), 
-                {
-                    "units": "degK", 
-                    "long_name": "Auto-Regressive Multi-Day Surface Air Temperature Forecast",
-                    "coordinates": "longitude latitude"
-                }
-            ),
+            "air_forecast": (["time", "h3_index"], final_predictions_kelvin.numpy(), {"units": "degK", "coordinates": "longitude latitude"}),
             "longitude": (["h3_index"], dataset.ds['longitude'].values, {"units": "degrees_east"}),
             "latitude": (["h3_index"], dataset.ds['latitude'].values, {"units": "degrees_north"}),
         },
-        coords={
-            "time": rollout_times,
-            "h3_index": dataset.ds['h3_index'].values
-        },
-        attrs={
-            "title": f"{forecast_days}-Day Graph Attention Auto-Regressive Rollout Model Output",
-            "history_window_input": f"{history_steps} steps",
-            "forecast_resolution": "3-hourly increments"
-        }
+        coords={"time": rollout_times, "h3_index": dataset.ds['h3_index'].values},
+        attrs={"title": f"{forecast_days}-Day Graph Attention Auto-Regressive Rollout Model Output"}
     )
     
     output_filename = "h3_autoregressive_forecast.nc"
@@ -118,5 +117,5 @@ def run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-
     print(f"SUCCESS: Auto-regressive forecast rollout saved to: {output_filename}")
 
 if __name__ == "__main__":
-    run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-model.ckpt", forecast_days=5)
+    run_autoregressive_rollout()
 

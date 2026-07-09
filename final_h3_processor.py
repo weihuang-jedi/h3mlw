@@ -44,8 +44,8 @@ def split_dateline_polygon(poly):
 # STEP 1: LOAD & HARD-ALIGN DATA STRUCTURES
 # ==========================================
 print("Loading datasets...")
-ds_h3_raw = xr.open_dataset("global_h3_res2_with_bounds.nc")
-ds_air = xr.open_dataset("air.sfc.2000.nc")
+ds_h3_raw = xr.open_dataset("data/global_h3_res2_with_bounds.nc")
+ds_air = xr.open_dataset("data/air.sfc.2000.nc")
 
 # 1. Force strict sorting of the H3 dataset by its index coordinate
 ds_h3 = ds_h3_raw.sortby('h3_index')

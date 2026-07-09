@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 
 # 1. Load the surface temperature regular lat/lon dataset
-ds_air = xr.open_dataset("air.sfc.2000.nc")
+ds_air = xr.open_dataset("data/air.sfc.1976.nc")
 
 # 2. Extract the first time step slice
 # xarray automatically handles missing values using the metadata flag
