@@ -14,7 +14,7 @@ model_params:
   solar_features: 4        # diurnal_sin, diurnal_cos, annual_sin, annual_cos
   forecast_offset: 1
   # Initial learning rate for AdamW optimizer
-  learning_rate: 0.0006
+  learning_rate: 0.0002
   # Hidden layer feature channel width inside the Graph Convolution network
   hidden_channels: 32
   attention_heads: 4

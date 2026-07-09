@@ -1,11 +1,10 @@
-To set up an auto-regressive evaluation pipeline, the model must generate forecasts iteratively by feeding its own previous prediction back into the input sequence as a new historical time step. [1] 
-For example, to project a multi-day forecast sequence into the future, the model takes real history at steps $[t-1, t]$ to predict t+1. To find step t+2, the model drops step t-1, shifts step t back, and treats its own prediction for t+1 as real data. [2] 
-This pipeline reads your trained PyTorch Lightning checkpoint, maps the initial ground-truth starting conditions, manages the cyclical solar updates for each future time step, and generates a structured NetCDF rollout file.
-------------------------------
-## Step 1: Create the Auto-Regressive Rollout Script (rollout_forecast.py)
-Save this script in your working directory. It handles the iterative data loop and maps the results back into a clean NetCDF file structure for validation.
+import yaml
+import xarray as xr
+import pandas as pd
+import numpy as np
+import torch
+from train_single_gpu import SingleGPUH3WeatherGAT, GlobalH3WeatherDataset
 
-import yamlimport xarray as xrimport numpy as npimport torchfrom train_distributed import DistributedH3WeatherGAT, GlobalH3WeatherDataset
 def run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-model.ckpt", forecast_days=5):
     # 1. Load System Configuration Parameters
     print("Reading configuration file...")
@@ -14,8 +13,7 @@ def run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-
 
     # 2. Initialize and Load Trained Weights from Checkpoint
     print(f"Loading trained weights from checkpoint: {checkpoint_path}...")
-    # map_location='cpu' ensures it loads safely before transferring to the active GPU
-    model = DistributedH3WeatherGAT.load_from_checkpoint(checkpoint_path, map_location="cpu")
+    model = SingleGPUH3WeatherGAT.load_from_checkpoint(checkpoint_path, map_location="cpu")
     model.eval() # Freeze layers and deactivate dropout for inference
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -118,34 +116,7 @@ def run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-
     output_filename = "h3_autoregressive_forecast.nc"
     ds_rollout.to_netcdf(output_filename, format="NETCDF4")
     print(f"SUCCESS: Auto-regressive forecast rollout saved to: {output_filename}")
+
 if __name__ == "__main__":
-    # Execute a 5-day auto-regressive forecast run
     run_autoregressive_rollout(checkpoint_path="checkpoints/best-h3-diurnal-gat-model.ckpt", forecast_days=5)
-
-------------------------------
-## Step 2: Evaluation and Verification Workflow
-Once the script generates your h3_autoregressive_forecast.nc rollout file, you can evaluate your model's accuracy by calculating validation metrics against the ground-truth data in your master file:
-1. Calculate Mean Absolute Error (MAE) Drift
-Because errors compound at each step during an auto-regressive rollout, you should track your prediction error drift over time. This helper block compares your predictions against the real values to measure model performance:
-
-import xarray as xrimport numpy as np
-# Load verification gridsds_true = xr.open_dataset("global_h3_res2_air_all_times.nc")ds_pred = xr.open_dataset("h3_autoregressive_forecast.nc")
-# Align timestampstrue_slice = ds_true['air_h3'].sel(time=ds_pred.time)pred_slice = ds_pred['air_forecast']
-# Compute the Absolute Error matrix blockerror_matrix = np.abs(pred_slice.values - true_slice.values)
-# Average across all global nodes to find the MAE for each future time stepmae_per_step = error_matrix.mean(axis=1)
-
-print("--- FORECAST ERROR DRIFT REPORT ---")for step_idx in range(len(mae_per_step)):
-    hour = (step_idx + 1) * 3
-    print(f"Hour +{hour:02d} Forecast MAE: {mae_per_step[step_idx]:.3f} K")
-
-2. Analyze Local Flow Patterns
-To verify if your GATv2 model has successfully learned localized atmospheric advection patterns:
-
-* Check the output error values across geographic features using your land-sea mask.
-* You will likely find that coastal regions and high mountain boundaries preserve lower error rates compared to simple baseline models. This confirms that the attention heads are dynamically adjusting their weights to handle complex geographic interfaces cleanly.
-
-Would you like to extend this script to calculate anomaly correlation coefficients (ACC) or generate an animated visualization of your multi-day rollout forecast?
-
-[1] [https://arxiv.org](https://arxiv.org/html/2309.06979v3)
-[2] [https://medium.com](https://medium.com/data-science-collective/one-step-vs-multi-step-time-series-forecasting-a-practical-guide-502cc116ae81)
 

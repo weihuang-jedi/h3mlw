@@ -1,122 +1,20 @@
-Expanding your Graph Neural Network into a multi-variable architecture (handling parameters like U/V wind components, relative humidity, or geopotential height) shifts your model from a simple thermal tracker to a true Global Circulation AI Forecast Engine, mimicking systems like Google's GraphCast or ECMWF’s AIFS.
-To achieve this, we cannot just add flat variables; we must modify the ingestion pipeline to build a structured multi-feature channel tensor for every node, and update your GATv2 model to dynamically weight how these variables interact over time (e.g., teaching the attention mechanism how a strong wind vector advects high temperature down the H3 graph).
-------------------------------
-## Step 1: Update the Configuration File (config.yaml)
-We need to declare our new weather parameters and tell the dataset how many target features to track. We will include 4 weather variables: air (Temperature), uwnd (U-Wind), vwnd (V-Wind), and rhum (Relative Humidity).
-This changes your total input channel width to 14 (2 history steps × 4 weather variables + 2 geographic static features + 4 solar forcing variables).
-
-paths:
-  data_nc: "global_h3_res2_multi_variable_times.nc" # New output file destination
-  edge_index_pt: "h3_edge_index.pt"
-  checkpoint_dir: "checkpoints/"
-model_params:
-  history_steps: 2
-  weather_features: 4      # air, uwnd, vwnd, rhum
-  static_features: 2       # land_sea_mask, elevation
-  solar_features: 4        # diurnal_sin, diurnal_cos, annual_sin, annual_cos
-  forecast_offset: 1
-  learning_rate: 0.0002
-  hidden_channels: 64      # Sized up to capture cross-variable features
-  attention_heads: 4
-training_params:
-  batch_size: 4
-  num_workers: 8
-  max_epochs: 20
-  num_nodes: 1
-
-------------------------------
-## Step 2: Create the Multi-Variable Ingestion Pipeline Script (build_multi_var_dataset.py)
-This script loops through your separate reanalysis component files, executes parallel 3D interpolation onto your sorted H3 centroid coordinates, cleans missing value constants, and packs everything into a single 3D master matrix dataset matching dimensions (time, h3_index, variable).
-
-import xarray as xrimport numpy as npimport pandas as pd
-def build_multi_variable_h3_dataset():
-    print("Opening base geometry definition dataset...")
-    ds_h3 = xr.open_dataset("global_h3_res2_with_bounds.nc").sortby('h3_index')
-    
-    # Extract target coordinates
-    h3_lats = ds_h3['latitude'].values
-    h3_lons = ds_h3['longitude'].values
-    h3_lon_converted = np.mod(h3_lons, 360)
-    
-    target_lon = xr.DataArray(h3_lon_converted, dims=["h3_index"])
-    target_lat = xr.DataArray(h3_lats, dims=["h3_index"])
-
-    # Define the source files and their matching internal variable keys
-    # Replace these filenames with your active cluster dataset paths
-    variables_map = {
-        "air_h3": {"file": "air.sfc.2000.nc", "key": "air"},
-        "uwnd_h3": {"file": "uwnd.sfc.2000.nc", "key": "uwnd"},
-        "vwnd_h3": {"file": "vwnd.sfc.2000.nc", "key": "vwnd"},
-        "rhum_h3": {"file": "rhum.sfc.2000.nc", "key": "rhum"}
-    }
-
-    interpolated_vars = {}
-    time_coords = None
-
-    for out_key, meta in variables_map.items():
-        print(f"Processing source weather parameter matrix: {meta['file']}...")
-        ds_src = xr.open_dataset(meta['file']).compute()
-        
-        # Pull or store unified temporal coordinates array
-        if time_coords is None:
-            time_coords = ds_src.time.values
-            
-        src_slice = ds_src[meta['key']].isel(time=slice(0, len(time_coords))).drop_vars('time', errors='ignore')
-        
-        # Handle descending coordinate orientation
-        if src_slice.lat.values[0] > src_slice.lat.values[-1]:
-            src_slice = src_slice.sortby('lat')
-            
-        # Close the 358.125° to 360° global edge wrap-around gap via padding column replication
-        new_lon_coords = np.append(src_slice.lon.values, 360.0)
-        padded_data = np.concatenate([src_slice.values, src_slice.values[:, :, :1]], axis=2) # time, lat, lon
-        
-        clean_grid = xr.DataArray(
-            padded_data,
-            coords={'time': time_coords, 'lat': src_slice.lat.values, 'lon': new_lon_coords},
-            dims=['time', 'lat', 'lon']
-        )
-        
-        print(f" -> Splicing 3D interpolation onto H3 graph topology grid...")
-        interp_ds = clean_grid.interp(lon=target_lon, lat=target_lat, method="linear", kwargs={'bounds_error': False, 'fill_value': None})
-        raw_vals = interp_ds.values
-        
-        # Clean missing values constants (-9.96921e+36f or isolated NaNs)
-        corrupt_mask = (raw_vals < -900) | (raw_vals > 9000) | np.isnan(raw_vals)
-        if np.any(corrupt_mask):
-            safe_mean = np.nanmean(raw_vals[(raw_vals >= -500) & (raw_vals <= 5000)])
-            raw_vals[corrupt_mask] = safe_mean if not np.isnan(safe_mean) else 0.0
-            
-        interpolated_vars[out_key] = (["time", "h3_index"], raw_vals)
-
-    # 3. Append static boundaries
-    interpolated_vars["longitude"] = (["h3_index"], h3_lons)
-    interpolated_vars["latitude"] = (["h3_index"], h3_lats)
-    interpolated_vars["longitude_bounds"] = (["h3_index", "vertices"], ds_h3['longitude_bounds'].values)
-    interpolated_vars["latitude_bounds"] = (["h3_index", "vertices"], ds_h3['latitude_bounds'].values)
-    interpolated_vars["land_sea_mask"] = (["h3_index"], ds_h3['land_sea_mask'].values)
-    interpolated_vars["elevation"] = (["h3_index"], ds_h3['elevation'].values)
-
-    print("Writing multi-variable master dataset to disk...")
-    ds_master = xr.Dataset(
-        data_vars=interpolated_vars,
-        coords={"time": time_coords, "h3_index": ds_h3.h3_index.values, "vertices": np.arange(6)},
-        attrs={"title": "Master Multi-Variable Global AI Ingestion Dataset"}
-    )
-    
-    ds_master.to_netcdf("global_h3_res2_multi_variable_times.nc", format="NETCDF4")
-    print("SUCCESS: File built! Ready for multi-variable deep learning optimization runs.")
-if __name__ == "__main__":
-    build_multi_variable_h3_dataset()
-
-------------------------------
-## Step 3: Upgrade your Model Ingestion Architecture (train_single_gpu.py)
-This updated, self-contained single-GPU script automatically handles multiple weather variables. It scales and normalizes each variable independently inside a dedicated loop to prevent data skewing, concatenates them into a unified node feature matrix, and expands your output layer to project all 4 target states simultaneously.
-
-import yamlimport xarray as xrimport pandas as pdimport numpy as npimport torchimport torch.nn as nnfrom torch_geometric.nn import GATv2Convfrom torch.utils.data import Dataset, DataLoader, random_splitimport pytorch_lightning as plfrom pytorch_lightning.callbacks import ModelCheckpoint
+import yaml
+import xarray as xr
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+from torch_geometric.nn import GATv2Conv
+from torch.utils.data import Dataset, DataLoader, random_split
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 torch.set_float32_matmul_precision('high')
-# =====================================================================# A. MULTI-VARIABLE CONFIG-DRIVEN DATASET# =====================================================================class GlobalH3MultiVariableDataset(Dataset):
+
+# =====================================================================
+# A. MULTI-VARIABLE CONFIG-DRIVEN DATASET
+# =====================================================================
+class GlobalH3MultiVariableDataset(Dataset):
     def __init__(self, nc_path, history_steps, forecast_offset):
         self.ds = xr.open_dataset(nc_path)
         
@@ -197,7 +95,11 @@ torch.set_float32_matmul_precision('high')
         y = self.weather_tensor[target_idx] # Target shape becomes multi-variable: (num_nodes, 4)
         
         return x_combined, y
-# =====================================================================# B. PYTORCH LIGHTNING DATAMODULE# =====================================================================class H3DataModule(pl.LightningDataModule):
+
+# =====================================================================
+# B. PYTORCH LIGHTNING DATAMODULE
+# =====================================================================
+class H3DataModule(pl.LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.cfg = config
@@ -218,7 +120,11 @@ torch.set_float32_matmul_precision('high')
         return DataLoader(self.train_dataset, batch_size=self.cfg['training_params']['batch_size'], shuffle=True, num_workers=self.cfg['training_params']['num_workers'], pin_memory=True, drop_last=True)
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.cfg['training_params']['batch_size'], shuffle=False, num_workers=self.cfg['training_params']['num_workers'], pin_memory=True)
-# =====================================================================# C. SINGLE-GPU MULTI-VARIABLE GRAPH ATTENTION WEATHER NETWORK# =====================================================================class SingleGPUMultiVarH3GAT(pl.LightningModule):
+
+# =====================================================================
+# C. SINGLE-GPU MULTI-VARIABLE GRAPH ATTENTION WEATHER NETWORK
+# =====================================================================
+class SingleGPUMultiVarH3GAT(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.save_hyperparameters()
@@ -290,6 +196,7 @@ torch.set_float32_matmul_precision('high')
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.parameters(), lr=self.cfg['model_params']['learning_rate'], weight_decay=1e-3)
+
 def main():
     print("Reading configuration parameters...")
     with open("config.yaml", "r") as f:
@@ -305,33 +212,8 @@ def main():
     
     trainer = pl.Trainer(
         max_epochs=config['training_params']['max_epochs'],
+accelerator="gpu", devices=1, num_nodes=1, strategy="auto",callbacks=[checkpoint_callback], precision="32", log_every_n_steps=10,gradient_clip_val=0.3, gradient_clip_algorithm="norm")print("Launching Single-GPU Multi-Variable GATv2 Attention Forecast Engine...")
 
-accelerator="gpu", devices=1, num_nodes=1, strategy="auto",
-callbacks=[checkpoint_callback], precision="32", log_every_n_steps=10,
-gradient_clip_val=0.3, gradient_clip_algorithm="norm"
-)
-print("Launching Single-GPU Multi-Variable GATv2 Attention Forecast Engine...")
-trainer.fit(model, datamodule=datamodule)
-if name == "main":
-main()
-
-
----
-
-### Step 4: Step-by-Step Multi-Variable Execution Guide
-
-**Step 4.1: Interp and compile your variables**  
-Ensure your four reanalysis files (`air.sfc.2000.nc`, `uwnd.sfc.2000.nc`, etc.) are placed in your current directory, then run the preprocessing compiler script:
-```bash
-python build_multi_var_dataset.py
-
-This will generate your clean master dataset file: global_h3_res2_multi_variable_times.nc.
-Step 4.2: Update and execute the Single-GPU training script
-Save the updated model file over your train_single_gpu.py file, configure your config.yaml to match Step 1, and launch your job submission script:
-
-sbatch submit_weather_ai.sh
-
-The model will now run training cycles across all four weather parameters simultaneously. It automatically captures cross-variable physical structures, teaching the network how variations in wind vectors and local relative humidity alter temperature fields over time.
-Let me know if you would like me to modify your auto-regressive evaluation pipeline script (rollout_forecast.py) to handle multi-variable forecasting rollouts next!
+trainer.fit(model, datamodule=datamodule)if name == "main":main()
 
 
