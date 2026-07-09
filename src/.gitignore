@@ -1,1 +1,5 @@
 log.*.out
+h3_edge_index.pt
+__pycache__
+lightning_logs
+checkpoints

@@ -1,0 +1,30 @@
+paths:
+  # Path to your master 3D time-series NetCDF file
+  data_nc: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/data/global_h3_res2_air_all_times.nc"
+  # Destination where the generated graph topology matrix is saved/read
+  edge_index_pt: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/data/h3_edge_index.pt"
+  # Directory where model weights and checkpoints will be saved
+  checkpoint_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/data/checkpoints/"
+
+model_params:
+  # Number of past time steps to feed into the GNN model (e.g., 2 frames = 6 hours)
+  history_steps: 2
+  # How many steps ahead to forecast (e.g., 1 step = +3 hours)
+  static_features: 2       # land_sea_mask, elevation
+  solar_features: 4        # diurnal_sin, diurnal_cos, annual_sin, annual_cos
+  forecast_offset: 1
+  # Initial learning rate for AdamW optimizer
+  learning_rate: 0.0002
+  # Hidden layer feature channel width inside the Graph Convolution network
+  hidden_channels: 32
+  attention_heads: 4
+
+training_params:
+  # Number of sequences loaded per GPU per batch step
+  batch_size: 4
+  # Number of asynchronous CPU worker threads loading data for each GPU
+  num_workers: 8
+  # Total times the model iterates over the entire dataset
+  max_epochs: 20
+  # Number of physical cluster nodes allocated in your Slurm configuration
+  num_nodes: 1

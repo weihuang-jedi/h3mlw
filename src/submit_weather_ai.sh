@@ -9,7 +9,7 @@
 #SBATCH --output=log.training.out
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 
 set -x
 
@@ -31,22 +31,19 @@ echo "Launching Single-GPU training run on node: $SLURMD_NODENAME"
 # Step 2: Create the Topology Generator Script (build_graph.py)
 #python build_graph.py
 
+if [ ! -f h3_edge_index.pt ]
+then
+    python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc -o h3_edge_index.pt
+fi
+
 #rm -f ../data/checkpoints/*
-#rm -rf ../lightning_logs/*
+#rm -rf lightning_logs/*
 
 # Step 3: Create the Complete PyTorch Training Pipeline (train_distributed.py)
-python train_single_gpu.py
-
-# nvidia-smi -l 1
-
-#echo "Launching training job. Master node address is: $MASTER_ADDR"
-
-# Execute using srun to initialize process threads across the allocated cluster nodes
-#srun python -u ../src/run_distributed_training.py
+#python train_single_gpu.py
 
 # Step 4:
-
-python rollout_forecast.py
+ python rollout_forecast.py
 #python evaluate_acc.py
 #python plot_loss_function.py
 #python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4

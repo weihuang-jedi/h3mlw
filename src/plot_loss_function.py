@@ -21,12 +21,12 @@ def plot_weather_ai_loss():
     df = pd.read_csv(csv_path)
 
     # 2. Extract and parse non-empty training metrics
-    # Lightning logs train and validation data on separate steps, creating NaNs in combined rows
-    train_df = df[['epoch', 'train_loss']].dropna()
+    # CRITICAL FIX: Match the actual headers generated in metrics.csv
+    train_df = df[['epoch', 'train_loss_step']].dropna()
     val_df = df[['epoch', 'val_loss']].dropna()
 
     # Group multiple batch steps by epoch to create a clean, non-jagged line curve
-    train_epoch = train_df.groupby('epoch')['train_loss'].mean()
+    train_epoch = train_df.groupby('epoch')['train_loss_step'].mean()
     val_epoch = val_df.groupby('epoch')['val_loss'].mean()
 
     # 3. Initialize Plot Canvas

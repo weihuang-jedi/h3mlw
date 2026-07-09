@@ -2,13 +2,21 @@ import xarray as xr
 import numpy as np
 
 print("Loading forecast rollout and ground truth records...")
-ds_true = xr.open_dataset("global_h3_res2_air_all_times.nc")
+ds_true = xr.open_dataset("../data/global_h3_res2_air_sfc_1976.nc")
 ds_pred = xr.open_dataset("h3_autoregressive_forecast.nc")
 
-# Align matching timestamps
-times = ds_pred.time.values
-true_vals = ds_true['air_h3'].sel(time=times).values  # Shape: (time_steps, num_nodes)
-pred_vals = ds_pred['air_forecast'].values            # Shape: (time_steps, num_nodes)
+# Align matching timestamps using a safe intersection filter
+matching_times = np.intersect1d(ds_true.time.values, ds_pred.time.values)
+
+if len(matching_times) == 0:
+    raise ValueError("CRITICAL ERROR: Zero overlapping timestamps found between prediction and ground truth files. check time indexes manually.")
+
+# Pull metrics matching only the mutual valid timeframe windows
+true_vals = ds_true['air_h3'].sel(time=matching_times).values
+pred_vals = ds_pred['air_forecast'].sel(time=matching_times).values
+
+# Update the loop tracking array to use the unified time index length
+times = matching_times
 
 # Compute a simple historical climate baseline for this time window
 # (In production, this is a multi-decade average. Here we use the window mean as a proxy)
