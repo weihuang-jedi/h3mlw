@@ -52,4 +52,4 @@ python rollout_forecast.py
 #python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4
 #python animate_forecast.py
 #python ../utils/plot_regular_grid.py -i autoregressive_forecast.nc -s
-
+#python ../utils/animate_regular_grid.py -i autoregressive_forecast.nc -o animate_forecast.gif
