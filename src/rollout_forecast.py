@@ -25,7 +25,9 @@ class H3WeatherForecaster:
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"Checkpoint file not found at: {ckpt_path}")
             
-        self.model = SingleGPUH3WeatherGAT.load_from_checkpoint(ckpt_path, map_location="cpu")
+        # self.model = SingleGPUH3WeatherGAT.load_from_checkpoint(ckpt_path, map_location="cpu")
+        # Pass strict=False to ignore the new training-only buffers safely
+        self.model = SingleGPUH3WeatherGAT.load_from_checkpoint(ckpt_path, map_location="cpu", strict=False)
         self.model.eval()  # Freeze layers and deactivate dropout for inference
         self.model.to(self.device)
         print("Model successfully transferred to target hardware device.")

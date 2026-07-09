@@ -235,7 +235,39 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
 # =====================================================================
-# 3. ARGPARSE SCRIPT LAUNCH CONTROLLER
+# 3. CUSTOM STAGE & WALL-CLOCK TIMING PROGRESS LOGGER
+# =====================================================================
+class ProgressStageTracker(Callback):
+    """
+    A validation callback that prints step processing speeds and elapsed times.
+    Use this to accurately calculate your Slurm wall-time clock requirements.
+    """
+    def __init__(self):
+        super().__init__()  # <--- Added the missing underscores
+        self.epoch_start_time = 0
+        self.batch_start_time = 0
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epoch_start_time = time.time()
+        print(f"\n[STAGE PROGRESS] Beginning Epoch {trainer.current_epoch} loops...")
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        if batch_idx % 500 == 0:
+            self.batch_start_time = time.time()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if batch_idx > 0 and batch_idx % 500 == 0:
+            elapsed = time.time() - self.batch_start_time
+            steps_per_sec = 500.0 / elapsed
+            print(f" -> Processed steps: {batch_idx} | Speed: {steps_per_sec:.2f} steps/sec")
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        epoch_duration = time.time() - self.epoch_start_time
+        print(f"[STAGE COMPLETE] Epoch {trainer.current_epoch} finished in {epoch_duration/60.0:.2f} minutes.")
+        print(f" -> Projected time required for 5 epochs: {(epoch_duration * 5) / 3600.0:.2f} hours.\n")
+
+# =====================================================================
+# 4. ARGPARSE SCRIPT LAUNCH CONTROLLER
 # =====================================================================
 def main():
     parser = argparse.ArgumentParser(description="NOAA EPIC-Style Vectorized GATv2 Weather Model Training.")
@@ -256,6 +288,8 @@ def main():
 
     model = SingleGPUH3WeatherGAT(config, lats=lats, lons=lons)
 
+    stage_tracker = ProgressStageTracker()
+
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss", dirpath=config['paths']['checkpoint_dir'],
         filename="best-h3-20year-cyclic-model", save_top_k=1, mode="min"
@@ -263,7 +297,8 @@ def main():
 
     trainer = pl.Trainer(
         max_epochs=config['training_params']['max_epochs'],
-        accelerator="gpu", devices=1, callbacks=[checkpoint_callback],
+        accelerator="gpu", devices=1,
+        callbacks=[checkpoint_callback, stage_tracker],
         precision="32", log_every_n_steps=50, gradient_clip_val=0.3
     )
 
