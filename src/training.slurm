@@ -39,7 +39,7 @@ rm -f ../data/checkpoints/*
 rm -rf lightning_logs/*
 
 # Step 3: Create the Complete PyTorch Training Pipeline (train_distributed.py)
-python train_single_gpu.py
+python train_single_gpu.py -i ../data/global_h3_20years.zarr -c config.yaml
 
 # Step 4:
 #python rollout_forecast.py

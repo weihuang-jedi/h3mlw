@@ -14,8 +14,9 @@ model_params:
   attention_heads: 4
 
 training_params:
-  batch_size: 16           
-  num_workers: 4           # Sized down worker threads to prevent storage overloading
-  max_epochs: 5            # Sized down epochs; 20 years of data provides ample optimization batches
-  num_nodes: 1
-
+  batch_size: 2
+  num_workers: 4
+  max_epochs: 5
+  # ADVANCED ML IMPLEMENTATIONS
+  noise_injection_scale: 0.02   # Standard deviation of Gaussian noise added to inputs
+  train_rollout_steps: 3         # Multi-step unrolling loss depth horizon

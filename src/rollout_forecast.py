@@ -66,55 +66,75 @@ class H3WeatherForecaster:
         return solar_forcings
 
     def run_rollout(self):
-        """Executes the autoregressive rollout starting at the requested historical or future time."""
         if self.model is None or self.dataset is None:
             self.load_model()
             self.initialize_dataset()
 
-        # 1. Resolve timeline window details
         start_time_str = self.cfg['forecast_settings']['forecast_start_time']
         forecast_days = self.cfg['forecast_settings']['forecast_days']
         steps_per_day = self.cfg['model_params']['steps_per_day']
         history_steps = self.cfg['model_params']['history_steps']
         total_rollout_steps = forecast_days * steps_per_day
         
-        print(f"Finding data slice index matching requested start time: {start_time_str}")
         target_timestamp = pd.to_datetime(start_time_str)
-        
-        # Locate the entry index inside our data cache
-        time_series = pd.to_datetime(self.dataset.times)
-        if target_timestamp not in time_series:
-            raise KeyError(f"Requested start time {start_time_str} is not present within dataset timelines.")
-        
-        start_idx = np.where(time_series == target_timestamp)[0][0]
 
-        # 2. Extract initial dynamic conditioning history window
-        raw_history = self.dataset.air_data[start_idx : start_idx + history_steps]
+        init_file = self.cfg['paths'].get('initial_condition_nc')
+        if init_file and os.path.exists(init_file):
+            print(f"Loading external operational initial conditions from: {init_file}")
+            ds_init = xr.open_dataset(init_file)
+            
+            # CRITICAL FIX: Ensure xarray time values are parsed cleanly as a pandas DatetimeIndex
+            time_series = pd.to_datetime(ds_init.time.values)
+            
+            if target_timestamp not in time_series:
+                raise KeyError(f"Requested start time {start_time_str} not found in initial condition file.")
+                
+            start_idx = np.where(time_series == target_timestamp)[0][0]
+            print(f" -> Found target timestamp at index offset: {start_idx}")
+            
+            # Extract warm-up states from operational observations file
+            raw_history = torch.tensor(ds_init['air_h3'].values[start_idx : start_idx + history_steps], dtype=torch.float32)
+        else:
+            print(f"Falling back to historical Zarr store index search for: {start_time_str}")
+            time_series = pd.to_datetime(self.dataset.times)
+            if target_timestamp not in time_series:
+                raise KeyError(f"Requested start time {start_time_str} is not present within historical dataset timelines.")
+            start_idx = np.where(time_series == target_timestamp)[0][0]
+            raw_history = self.dataset.air_data[start_idx : start_idx + history_steps]
+
+        print("Normalizing history context states...")
         norm_history = torch.nan_to_num((raw_history - self.dataset.air_mean) / (self.dataset.air_std + 1e-6), nan=0.0).t()
-        
         current_history = norm_history.to(self.device)
         static_features = self.dataset.static_features.to(self.device)
 
-        # 3. Handle solar vector mapping for the requested window length
-        rollout_time_window = self.dataset.times[start_idx + history_steps : start_idx + history_steps + total_rollout_steps]
-        # Pre-generate for the full sequence block lengths
-        full_timeline_slice = self.dataset.times[start_idx : start_idx + history_steps + total_rollout_steps]
+        print("Constructing dynamic rolling future timelines...")
+        rollout_time_window = pd.date_range(start=target_timestamp + pd.Timedelta(hours=3), 
+                                             periods=total_rollout_steps, 
+                                             freq='3h').values
+        
+        full_timeline_slice = pd.date_range(start=target_timestamp, 
+                                             periods=history_steps + total_rollout_steps, 
+                                             freq='3h').values
+                                             
+        # This is where your script was pausing:
         solar_forcings = self._generate_vectorized_solar_forcings(full_timeline_slice)
+        print(f"Solar array generated successfully. Shape: {solar_forcings.shape}")
 
         print(f"Starting auto-regressive forecast rollout ({total_rollout_steps} sequential steps)...")
         predictions_history = torch.zeros((total_rollout_steps, self.dataset.num_nodes), dtype=torch.float32)
 
         # 4. Interactive evaluation loop execution block
+        print("Entering GPU forward pass loop...")
         with torch.no_grad():
             for step in range(total_rollout_steps):
-                # The active solar context is index shifted by the context window lengths
                 current_solar_idx = history_steps + step
                 x_solar = solar_forcings[current_solar_idx].to(self.device)
 
-                # Combine current history arrays, static geography layers, and solar forcing components
-                x_input = torch.cat([current_history, static_features, x_solar], dim=1)
-                x_input = x_input.unsqueeze(0)  # Simulated batch mapping dimension
+                # Force inputs to float32 to prevent Tensor Core conflicts
+                x_input = torch.cat([current_history, static_features, x_solar], dim=1).float()
+                x_input = x_input.unsqueeze(0)  
 
+                # Run model forward pass
                 y_hat = self.model(x_input).squeeze(0)
                 predictions_history[step] = y_hat.cpu()
 
@@ -122,8 +142,9 @@ class H3WeatherForecaster:
                 updated_history = current_history[:, 1:]
                 current_history = torch.cat([updated_history, y_hat.unsqueeze(1)], dim=1)
 
+                print(f" -> Processed forecast step {step+1}/{total_rollout_steps}")
                 if (step + 1) % steps_per_day == 0:
-                    print(f" -> Completed Forecast Day {(step + 1) // steps_per_day}/{forecast_days}")
+                    print(f"[PROGRESS] Completed Forecast Day {(step + 1) // steps_per_day}/{forecast_days}")
 
         # 5. Export compliant data
         self._export_to_netcdf(predictions_history, rollout_time_window)
