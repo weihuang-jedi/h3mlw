@@ -48,6 +48,8 @@ python train_single_gpu.py
 
 python rollout_forecast.py
 #python evaluate_acc.py
-#python animate_forecast.py
+#python plot_loss_function.py
 #python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4
+#python animate_forecast.py
+#python ../utils/plot_regular_grid.py -i autoregressive_forecast.nc -s
 

@@ -37,6 +37,12 @@ do
 	      -i ${flnm} -o ${OUTPUT_FLNM}
    fi
 
+   python ${UTILDIR}/append_static_geography.py \
+      -i ${DATADIR}/${OUTPUT_FLNM} \
+      -m ${DATADIR}/${flnm} \
+      -e ${DATADIR}/ETOPO_2022_v1_60s_N90W180_bed.nc \
+      -o ${DATADIR}/${OUTPUT_FLNM}
+
    echo "python ${UTILDIR}/plot_regular_grid.py -i ${DATADIR}/${flnm} -o ${DATADIR}/air.sfc.${curyear}.png -s"
 
    n=$(( n + 1 ))
