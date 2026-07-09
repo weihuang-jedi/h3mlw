@@ -1,0 +1,14 @@
+paths:
+  data_pattern: "../data/global_h3_20years.zarr"
+  checkpoint_path: "checkpoints/best-h3-20year-cyclic-model.ckpt"
+  output_nc: "h3_autoregressive_forecast.nc"
+
+model_params:
+  history_steps: 4       # Number of past context steps the model expects
+  forecast_offset: 1     # Step offset
+  steps_per_day: 8       # 3-hourly data checkpoints (24 / 3 = 8)
+
+forecast_settings:
+  # Explicitly specify the future deployment target datetime anchor
+  forecast_start_time: "2026-07-10 12:00:00" 
+  forecast_days: 5

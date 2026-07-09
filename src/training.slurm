@@ -1,7 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=h3_weather_ai
+#SBATCH --job-name=training
 #SBATCH --account=epic
-#SBATCH --chdir=/scratch4/NAGAPE/epic/Wei.Huang/src/h3/src
 #SBATCH --export=NONE
 #SBATCH --gres=gpu:h100:1
 #SBATCH --mem=128G
@@ -24,26 +23,26 @@ mamba activate anemoi
 # Ensure output streams log in real-time without print buffering lags
 export PYTHONUNBUFFERED=1
 
+cd /scratch4/NAGAPE/epic/Wei.Huang/src/h3/src
 echo "Launching Single-GPU training run on node: $SLURMD_NODENAME"
 
 # Step 1: Create the Configuration File (config.yaml)
 
 # Step 2: Create the Topology Generator Script (build_graph.py)
-#python build_graph.py
 
 if [ ! -f h3_edge_index.pt ]
 then
     python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc -o h3_edge_index.pt
 fi
 
-#rm -f ../data/checkpoints/*
-#rm -rf lightning_logs/*
+rm -f ../data/checkpoints/*
+rm -rf lightning_logs/*
 
 # Step 3: Create the Complete PyTorch Training Pipeline (train_distributed.py)
-#python train_single_gpu.py
+python train_single_gpu.py
 
 # Step 4:
- python rollout_forecast.py
+#python rollout_forecast.py
 #python evaluate_acc.py
 #python plot_loss_function.py
 #python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4

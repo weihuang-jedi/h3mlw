@@ -1,3 +1,4 @@
+*.gif
 log.*.out
 h3_edge_index.pt
 __pycache__
