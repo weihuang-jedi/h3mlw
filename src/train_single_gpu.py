@@ -109,109 +109,119 @@ class MultiYearH3DataModule(pl.LightningDataModule):
 class SingleGPUH3WeatherGAT(pl.LightningModule):
     def __init__(self, config, lats=None, lons=None):
         super().__init__()
-        self.save_hyperparameters(ignore=['lats', 'lons'])
+        # Explicitly save it to the class object right here
         self.cfg = config
-        
+
+        # Save to hparams container cleanly
+        self.save_hyperparameters(ignore=['lats', 'lons'])
+
         # 1. LATITUDE LOSS WEIGHTING INITIALIZATION
         if lats is not None:
-            # Cosine of latitude accurately scales spherical surface grid cell areas
             weights = np.cos(np.radians(lats))
-            weights /= weights.mean() # Normalize weights around a baseline of 1.0
+            weights /= weights.mean()  # Normalize weights around a baseline of 1.0
             self.register_buffer("spatial_loss_weights", torch.from_numpy(weights).float())
         else:
             self.register_buffer("spatial_loss_weights", None)
 
-        self.register_buffer("lons_deg", torch.from_numpy(lons).float() if lons is not None else None)
+        if lons is not None:
+            self.register_buffer("lons_deg", torch.from_numpy(lons).float())
+        else:
+            self.register_buffer("lons_deg", None)
 
+        # Load Graph Topology
         edge_index = torch.load(self.cfg['paths']['edge_index_pt'], map_location="cpu")
         self.register_buffer("edge_index", edge_index)
 
-        in_channels = (self.cfg['model_params']['history_steps'] +
-                       self.cfg['model_params']['static_features'] +
-                       self.cfg['model_params']['solar_features'])
-        h_channels = self.cfg['model_params']['hidden_channels']
-        heads = self.cfg['model_params']['attention_heads']
+        # Dimensions
+        in_channels = 8  # (2 history + 2 static + 4 solar)
+        latent_dim = config['model_params']['hidden_channels'] # e.g., 128
 
-        self.feature_norm = nn.LayerNorm(in_channels)
-        self.hidden_norm1 = nn.LayerNorm(h_channels * heads)
-        self.hidden_norm2 = nn.LayerNorm(h_channels)
+        # 1. ENCODER MLP: Compress raw inputs per-node into latent space
+        self.encoder = nn.Sequential(
+            nn.Linear(in_channels, latent_dim),
+            nn.SiLU(),
+            nn.Linear(latent_dim, latent_dim)
+        )
 
-        self.gat1 = GATv2Conv(in_channels=in_channels, out_channels=h_channels, heads=heads, concat=True, dropout=0.05)
-        self.relu = nn.ReLU()
-        self.gat2 = GATv2Conv(in_channels=h_channels * heads, out_channels=h_channels, heads=heads, concat=False, dropout=0.05)
-        self.linear = nn.Linear(h_channels, 1)
+        # 2. PROCESSOR: Deep Graph Attention layers operating entirely in latent space
+        self.gat1 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, heads=4, concat=False)
+        self.gat2 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, heads=4, concat=False)
+
+        # 3. DECODER MLP: Map latent space back down to physical weather variables (1 output: Temp)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.SiLU(),
+            nn.Linear(latent_dim, 1)
+        )
 
     def forward(self, x):
-        batch_size, num_nodes, features = x.shape
-        x_flat = x.view(-1, features)
-        x_flat = self.feature_norm(x_flat)
+        # x shape: [Batch, Nodes, Features]
+        batch_size, num_nodes, _ = x.shape
 
+        # Step 1: Encode node states into latent vectors
+        h = self.encoder(x) # Shape: [Batch, Nodes, Latent_Dim]
+
+        # Flatten batch for PyG message passing
+        h_flat = h.view(-1, h.shape[-1])
+
+        # Step 2: Process spatial relationships across the graph index with inline batch math
         num_edges = self.edge_index.shape[1]
         local_edge_index = self.edge_index.to(x.device)
         offsets = torch.arange(batch_size, device=x.device).repeat_interleave(num_edges) * num_nodes
         edge_index_batched = local_edge_index.repeat(1, batch_size) + offsets
 
-        with torch.amp.autocast('cuda', enabled=False):
-            h = self.gat1(x_flat.float(), edge_index_batched)
-            h = torch.clamp(h, min=-5.0, max=5.0)
-            h = self.hidden_norm1(h)
-            h = self.relu(h)
+        # Apply GAT layers using torch.relu directly
+        h_flat = torch.relu(self.gat1(h_flat, edge_index_batched))
+        h_flat = torch.relu(self.gat2(h_flat, edge_index_batched))
 
-            h = self.gat2(h, edge_index_batched)
-            h = torch.clamp(h, min=-5.0, max=5.0)
-            h = self.hidden_norm2(h)
-            h = self.relu(h)
-            out_flat = self.linear(h)
+        # Reshape back to batch format
+        h = h_flat.view(batch_size, num_nodes, -1)
 
-        return out_flat.view(batch_size, num_nodes).to(x.dtype)
+        # Step 3: Decode latent vectors back to single temperature variable predictions
+        out = self.decoder(h) # Shape: [Batch, Nodes, 1]
+        return out.squeeze(-1)
 
     def compute_weighted_loss(self, pred, target):
         """Calculates area-weighted MSE loss based on node latitude."""
         loss_matrix = (pred - target) ** 2
-        if self.spatial_loss_weights is not None:
+        if getattr(self, "spatial_loss_weights", None) is not None:
             # Broadcast weights across the batch axis
             loss_matrix = loss_matrix * self.spatial_loss_weights.unsqueeze(0)
         return loss_matrix.mean()
 
     def _generate_solar_for_step(self, base_idx, step_offset, batch_size, num_nodes, device):
         """Helper to generate solar arrays dynamically during multi-step unrolling."""
-        # Simple simulation timeline step tracker
-        hours_offset = (step_offset + 1) * 3 
+        hours_offset = (step_offset + 1) * 3
         x_solar = torch.zeros((batch_size, num_nodes, 4), device=device)
-        # Fallback to simple zero-filled forcings if coordinate matrices are offline during batch
         return x_solar
 
     def training_step(self, batch, batch_idx):
         x, y_true_start, start_indices = batch
         batch_size, num_nodes, _ = x.shape
         history_steps = self.cfg['model_params']['history_steps']
-        
-        # 2. INJECT GAUSSIAN NOISE TO PREVENT AR EXPLOSIONS
-        # Target the first 'history_steps' channels which represent dynamic air fields
+
+        # Inject Gaussian Noise to prevent AR Explosions
         noise_scale = self.cfg['training_params'].get('noise_injection_scale', 0.02)
         if self.training and noise_scale > 0:
             noise = torch.randn_like(x[:, :, :history_steps]) * noise_scale
             x[:, :, :history_steps] = x[:, :, :history_steps] + noise
 
-        # 3. MULTI-STEP ROLLOUT UNROLL TRAINING (3-Step Optimization Horizon)
+        # Multi-Step Rollout Training Horizon
         rollout_steps = self.cfg['training_params'].get('train_rollout_steps', 3)
         total_loss = 0.0
-        
+
         current_history = x[:, :, :history_steps].clone()
         static_features = x[:, :, history_steps : history_steps+2].clone()
-        
+
         for step in range(rollout_steps):
-            # Pull solar tensor
-            x_solar = x[:, :, history_steps+2:].clone() # Simplify: reuse basic batch forcing alignment
-            
+            x_solar = x[:, :, history_steps+2:].clone()
+
             x_input = torch.cat([current_history, static_features, x_solar], dim=2)
             y_hat = self(x_input)
-            
-            # Fetch target ground-truth placeholder (using single target as simplified proxy)
-            # In production, data loaders must pass y arrays containing shapes of [Batch, Nodes, Steps]
+
             step_loss = self.compute_weighted_loss(y_hat, y_true_start)
             total_loss += step_loss
-            
+
             # Autoregressive shift queue sequence
             updated_history = current_history[:, :, 1:]
             current_history = torch.cat([updated_history, y_hat.unsqueeze(2)], dim=2)
@@ -228,11 +238,22 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.cfg['model_params']['learning_rate'], weight_decay=1e-3)
+
         scheduler = torch.optim.lr_scheduler.CyclicLR(
-            optimizer, base_lr=self.cfg['model_params']['learning_rate'], max_lr=self.cfg['model_params']['max_lr'],
-            step_size_up=2000, mode='triangular2', cycle_momentum=False
+            optimizer,
+            base_lr=self.cfg['model_params']['learning_rate'],
+            max_lr=self.cfg['model_params']['max_lr'],
+            step_size_up=2000,
+            mode='triangular2',
+            cycle_momentum=False
         )
-        return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
+
+        scheduler_config = {
+            "scheduler": scheduler,
+            "interval": "step",
+            "frequency": 1
+        }
+        return [optimizer], [scheduler_config]
 
 # =====================================================================
 # 3. CUSTOM STAGE & WALL-CLOCK TIMING PROGRESS LOGGER
