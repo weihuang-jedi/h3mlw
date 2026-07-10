@@ -16,8 +16,8 @@ model_params:
   max_lr: 0.002
 
 training_params:
-  batch_size: 2
+  batch_size: 4
   num_workers: 4
-  max_epochs: 20
+  max_epochs: 10
   noise_injection_scale: 0.02
   train_rollout_steps: 3

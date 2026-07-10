@@ -42,10 +42,11 @@ fi
 python train_single_gpu.py -i ../data/global_h3_20years.zarr -c config.yaml
 
 # Step 4:
-#python rollout_forecast.py
-#python evaluate_acc.py
-#python plot_loss_function.py
+rm -f h3_autoregressive_forecast.nc autoregressive_forecast.nc animate_forecast.gif
+python rollout_forecast.py
+
+#python ../utils/plot_loss_function.py
+#python ../utils/evaluate_acc.py -t ../data/global_h3_res2_air_sfc_2000.nc -p h3_autoregressive_forecast.nc
 #python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4
-#python animate_forecast.py
-#python ../utils/plot_regular_grid.py -i autoregressive_forecast.nc -s
 #python ../utils/animate_regular_grid.py -i autoregressive_forecast.nc -o animate_forecast.gif
+#python ../utils/plot_regular_grid.py -i autoregressive_forecast.nc -s

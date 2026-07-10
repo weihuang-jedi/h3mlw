@@ -33,19 +33,9 @@ do
    # rm -f ${OUTPUT_FLNM}
    if [ ! -f ${OUTPUT_FLNM} ]
    then
-      # python ${UTILDIR}/interpolate2h3.py \
-      #       -i ${flnm} -o ${OUTPUT_FLNM}
-
-      # python ${UTILDIR}/append_static_geography.py \
-      #    -i ${DATADIR}/${OUTPUT_FLNM} \
-      #    -m ${DATADIR}/${flnm} \
-      #    -e ${DATADIR}/ETOPO_2022_v1_60s_N90W180_bed.nc \
-      #    -o ${DATADIR}/${OUTPUT_FLNM}
-
-      python ${UTILDIR}/interpolate_and_append_h3.py \
-         -i ${flnm} \
-         -e ${DATADIR}/ETOPO_2022_v1_60s_N90W180_bed.nc \
-         -o ${DATADIR}/${OUTPUT_FLNM}
+      python ${UTILDIR}/interpolate2h3.py \
+	 --input ${flnm} --grid ${DATADIR}/global_h3_res2_with_bounds.nc \
+	 --output ${OUTPUT_FLNM}
    fi
 
    echo "python ${UTILDIR}/plot_regular_grid.py -i ${DATADIR}/${flnm} -o ${DATADIR}/air.sfc.${curyear}.png -s"

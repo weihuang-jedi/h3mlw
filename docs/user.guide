@@ -17,3 +17,42 @@ Setup a toy AI air temperature modeil.
    python append_to_master_grid.py \
       -g global_h3_res2_with_bounds.nc \
       -e ../data/ETOPO_2022_v1_60s_N90W180_geoid.nc
+
+5. interpolate to h3 grid:
+   python interpolate2h3.py --input ../data/air.sfc.2000.nc --grid ../data/global_h3_res2_with_bounds.nc --output global_h3_res2_air_sfc_2000.nc
+
+   edit and run "get_data.sh" to get data, and do interpolation for all period.
+
+6. pack to Zarr
+   python pack_to_zarr.py \
+      -i "../data/global_h3_res2_air_sfc_*.nc" \
+      -o "../data/global_h3_20years.zarr" \
+      -c 32 -l 3
+
+7. build graph
+   python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc
+
+8. training
+   edit config.yaml
+   sbatch training.slurm
+
+9. forecast
+   edit forecast.yaml
+   forecast can be run in training.slurm
+   or sbatch forecast.slurm
+
+10. check loss function
+    python ../utils/plot_loss_function.py
+
+11. evaluate accuracy
+    python ../utils/evaluate_acc.py
+
+12. reconstruct back to lat-lon regular grid
+    python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4
+
+13. generate a movie of the forecast
+    python ../utils/animate_regular_grid.py -i autoregressive_forecast.nc -o animate_forecast.gif
+
+14. quick view of forecast
+    python ../utils/plot_regular_grid.py -i autoregressive_forecast.nc -s
+
