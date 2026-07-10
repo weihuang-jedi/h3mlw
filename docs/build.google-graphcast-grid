@@ -1,0 +1,34 @@
+1. build_icosahedral_mesh.py
+
+   python build_icosahedral_mesh.py -k 3 -o google-graphcast-grid
+
+2. check connection
+
+   python check_pt_graph.py -f google-graphcast-grid/icosahedral_edge_index_m3.pt
+
+3. append static geography data to mesh
+
+   python append_static_to_icosahedral.py --mesh google-graphcast-grid/global_icosahedral_mesh_m0.nc --etopo ../data/ETOPO_2022_v1_60s_N90W180_geoid.nc
+
+4. interpolate to icosahedral grid
+
+   python interpolate2icosahedral.py \
+  	--input ../data/air.sfc.2000.nc \
+  	--mesh google-graphcast-grid/global_icosahedral_mesh_m4.nc \
+  	--output google-graphcast-grid/global_icosahedral_m4_air_2000.nc
+
+   run script "convert_data.sh" to convert all of them.
+
+5. pack to Zarr
+
+   python ../pack_icosahedral_zarr.py \
+      -i "global_icosahedral_m4_air_19*.nc" \
+      -o "global_icosahedral_m4_24years.zarr" \
+      -c 32 \
+      -l 3
+
+6. build graph
+
+   python build_icosahedral_hierarchy.py -k 4 -o google-graphcast-grid
+
+

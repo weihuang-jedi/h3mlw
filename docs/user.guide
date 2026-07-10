@@ -18,6 +18,12 @@ Setup a toy AI air temperature modeil.
       -g global_h3_res2_with_bounds.nc \
       -e ../data/ETOPO_2022_v1_60s_N90W180_geoid.nc
 
+   -> triangular-mesh
+	python build_triangular_mesh.py -i global_h3_res2_with_bounds.nc -o . -f triangular_h3_res2.nc
+
+   -> check connections:
+	python check_pt_graph.py triangular_edge_index.pt
+
 5. interpolate to h3 grid:
    python interpolate2h3.py --input ../data/air.sfc.2000.nc --grid ../data/global_h3_res2_with_bounds.nc --output global_h3_res2_air_sfc_2000.nc
 
@@ -35,6 +41,11 @@ Setup a toy AI air temperature modeil.
       --res1 ../data/global_h3_res1_with_bounds.nc \
       --res2 ../data/global_h3_res2_with_bounds.nc \
       -o ../data
+
+   python build_multi_level_graph.py \
+      --resolutions 3 2 1 0 \
+      --paths global_h3_res3.nc global_h3_res2.nc global_h3_res1.nc global_h3_res0.nc \
+      -o ../graphs
 
 8. training
    edit config.yaml

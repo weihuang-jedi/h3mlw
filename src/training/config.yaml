@@ -1,0 +1,18 @@
+paths:
+  zarr_store: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid/global_icosahedral_m4_24years.zarr"
+  graph_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid" # Target directory containing your compiled .pt files
+
+model_params:
+  # GraphCast Multi-Mesh Hierarchy Components
+  hierarchy_levels: [4, 3, 2, 1, 0]
+  history_steps: 2
+  latent_dim: 256            # GraphCast relies heavily on uniform wide latent channels
+  processor_layers: 4        # Iterative message-passing steps across the multi-mesh
+  learning_rate: 0.0002
+
+training_params:
+  batch_size: 2
+  rollout_steps: 1
+  num_workers: 4
+  max_epochs: 15
+  precision: "16-mixed"
