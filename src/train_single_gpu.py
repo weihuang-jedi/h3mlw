@@ -123,7 +123,7 @@ class ResidualProcessorBlock(nn.Module):
 
 
 # =====================================================================
-# 3. HIGH-PERFORMANCE HIERARCHICAL WEATHER MODEL PIPELINE
+# UPGRADED 3-TIER DEEP HIERARCHICAL WEATHER MODEL PIPELINE
 # =====================================================================
 class SingleGPUH3WeatherGAT(pl.LightningModule):
     def __init__(self, config, lats=None, lons=None):
@@ -131,7 +131,7 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
         self.cfg = config
         self.save_hyperparameters(ignore=['lats', 'lons'])
 
-        # 1. Spatial Loss Weighting Initialization
+        # Spatial Loss Area Weighting Tracker
         if lats is not None:
             weights = np.cos(np.radians(lats))
             weights /= weights.mean()
@@ -139,80 +139,88 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
         else:
             self.register_buffer("spatial_loss_weights", None)
 
-        # 2. Load Multi-Resolution Topology Graph Tiers
-        edge_fine = torch.load(self.cfg['paths']['edge_index_pt'], map_location="cpu")
-        edge_coarse = torch.load(self.cfg['paths']['coarse_edge_index_pt'], map_location="cpu")
-        edge_f2c = torch.load(self.cfg['paths']['fine_to_coarse_edge_index_pt'], map_location="cpu")
-        
-        self.register_buffer("edge_index_fine", edge_fine)
-        self.register_buffer("edge_index_coarse", edge_coarse)
-        self.register_buffer("edge_index_fine_to_coarse", edge_f2c)
+        # Load 3-Tier Multi-Resolution Topologies
+        self.register_buffer("edge_res2", torch.load(config['paths']['edge_res2'], map_location="cpu"))
+        self.register_buffer("edge_res1", torch.load(config['paths']['edge_res1'], map_location="cpu"))
+        self.register_buffer("edge_res0", torch.load(config['paths']['edge_res0'], map_location="cpu"))
+        self.register_buffer("map_r2_to_r1", torch.load(config['paths']['map_r2_to_r1'], map_location="cpu"))
+        self.register_buffer("map_r1_to_r0", torch.load(config['paths']['map_r1_to_r0'], map_location="cpu"))
 
-        # 3. Dynamic Dimension Allocation
+        # Channel Parameter Calculations
         history_steps = config['model_params']['history_steps']
-        in_channels = history_steps + 2 + 4  # (history fields + 2 static features + 4 solar forcing parameters)
+        in_channels = history_steps + 2 + 4  # Weather History + Static Topography + Solar Radiation
         latent_dim = config['model_params']['hidden_channels']
         attn_heads = config['model_params'].get('attention_heads', 4)
 
-        # Encoder Level 1 (Physical -> Local Latent Space)
+        # 1. Base Encoder Layers
         self.fine_encoder = nn.Linear(in_channels, latent_dim)
         
-        # Encoder Level 2 (Bipartite Graph Compression: Fine Grid -> Coarse Grid)
-        self.coarse_encoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
-        
-        # 4. DEEP PROCESSOR STACK (GraphCast/AIFS inspired deep residual mapping)
-        # Defaulting to 4 deep layers to simulate global fluid interaction loops
-        num_processor_layers = config['training_params'].get('processor_layers', 4)
+        # 2. Inter-Resolution Aggregation Networks (Pooling Layers)
+        self.pool_r2_to_r1 = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
+        self.pool_r1_to_r0 = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
+
+        # 3. Macro Fluid Processor Core (Deep Residual Blocks at Global Root Resolution 0)
         self.processor_stack = nn.ModuleList([
             ResidualProcessorBlock(latent_dim=latent_dim, heads=attn_heads)
-            for _ in range(num_processor_layers)
+            for _ in range(config['training_params'].get('processor_layers', 4))
         ])
-        
-        # Decoder Level 1 (Bipartite Graph Expansion: Coarse Grid -> Fine Grid)
-        self.coarse_decoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
-        
-        # Decoder Level 2 (Latent -> Physical Temperature Variable Prediction)
+
+        # 4. Inter-Resolution Expansion Networks (Unpooling Layers)
+        self.unpool_r0_to_r1 = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
+        self.unpool_r1_to_res2 = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
+
+        # 5. Base Decoder Output Layer
         self.fine_decoder = nn.Linear(latent_dim, 1)
 
+    def _batch_bipartite_edges(self, base_map, batch_size, num_fine, num_coarse):
+        """Vectorizes index tracking structures across variable batch configurations."""
+        fine_offsets = torch.arange(batch_size, device=base_map.device).repeat_interleave(base_map.shape[1]) * num_fine
+        coarse_offsets = torch.arange(batch_size, device=base_map.device).repeat_interleave(base_map.shape[1]) * num_coarse
+        batched_map = base_map.repeat(1, batch_size)
+        batched_map[0] += fine_offsets
+        batched_map[1] += coarse_offsets
+        return batched_map
+
     def forward(self, x):
-        # x shape: [Batch, Fine_Nodes, Features]
-        batch_size, num_fine_nodes, _ = x.shape
+        batch_size, num_nodes_r2, _ = x.shape
         x_flat = x.view(-1, x.shape[-1])
 
-        # Step 1: Encode local surface physical node inputs
-        h_fine = torch.relu(self.fine_encoder(x_flat))
-        
-        # Calculate Multi-Step Bipartite Vectorized Graph Edge Offsets
-        num_coarse_nodes = int(self.edge_index_fine_to_coarse[1].max() + 1)
-        
-        f2c_offsets_fine = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index_fine_to_coarse.shape[1]) * num_fine_nodes
-        f2c_offsets_coarse = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index_fine_to_coarse.shape[1]) * num_coarse_nodes
-        
-        batched_f2c = self.edge_index_fine_to_coarse.repeat(1, batch_size)
-        batched_f2c[0] += f2c_offsets_fine
-        batched_f2c[1] += f2c_offsets_coarse
+        # Dynamic deduction of structural shape variables across layers
+        num_nodes_r1 = int(self.map_r2_to_r1[1].max() + 1)
+        num_nodes_r0 = int(self.map_r1_to_r0[1].max() + 1)
 
-        num_coarse_edges = self.edge_index_coarse.shape[1]
-        coarse_offsets = torch.arange(batch_size, device=x.device).repeat_interleave(num_coarse_edges) * num_coarse_nodes
-        batched_coarse_edges = self.edge_index_coarse.repeat(1, batch_size) + coarse_offsets
+        # Step 1: Initialize local latent vectors on Fine Grid (Res 2)
+        h_r2 = torch.relu(self.fine_encoder(x_flat))
 
-        # Initialize coarse global canvas
-        h_coarse_init = torch.zeros((num_coarse_nodes * batch_size, h_fine.shape[-1]), device=x.device)
-        
-        # Step 2: Pool information up into the Coarse Macro Tiers via Bipartite maps
-        h_coarse = torch.relu(self.coarse_encoder((h_fine, h_coarse_init), batched_f2c))
-        
-        # Step 3: Deep Residual Processing on macro-climate grid configurations
-        for layer in self.processor_stack:
-            h_coarse = layer(h_coarse, batched_coarse_edges)
-        
-        # Step 4: Unpool information back down to fine local spatial tracking matrices
-        batched_c2f = torch.stack([batched_f2c[1], batched_f2c[0]], dim=0)
-        h_fine_reconstructed = torch.relu(self.coarse_decoder((h_coarse, h_fine), batched_c2f))
-        
-        # Step 5: Decode back to physical Kelvin values
-        out_flat = self.fine_decoder(h_fine_reconstructed)
-        return out_flat.view(batch_size, num_fine_nodes)
+        # Vectorize multi-tier inter-resolution bipartite edge collections
+        map_b1 = self._batch_bipartite_edges(self.map_r2_to_r1, batch_size, num_nodes_r2, num_nodes_r1)
+        map_b2 = self._batch_bipartite_edges(self.map_r1_to_r0, batch_size, num_nodes_r1, num_nodes_r0)
+
+        # Step 2: Spatial Pooling Phase up the hierarchy
+        h_r1_init = torch.zeros((num_nodes_r1 * batch_size, h_r2.shape[-1]), device=x.device)
+        h_r1 = torch.relu(self.pool_r2_to_r1((h_r2, h_r1_init), map_b1))
+
+        h_r0_init = torch.zeros((num_nodes_r0 * batch_size, h_r2.shape[-1]), device=x.device)
+        h_r0 = torch.relu(self.pool_r1_to_r0((h_r1, h_r0_init), map_b2))
+
+        # Step 3: Deep Residual Processor Core message-passing on Root Grid (Res 0)
+        r0_edges = self.edge_res0.shape[1]
+        r0_offsets = torch.arange(batch_size, device=x.device).repeat_interleave(r0_edges) * num_nodes_r0
+        batched_r0_edges = self.edge_res0.repeat(1, batch_size) + r0_offsets
+
+        for block in self.processor_stack:
+            h_r0 = block(h_r0, batched_r0_edges)
+
+        # Step 4: Spatial Unpooling Phase down the hierarchy (reversing bipartite edges)
+        map_unb2 = torch.stack([map_b2[1], map_b2[0]], dim=0)
+        h_r1_reconstructed = torch.relu(self.unpool_r0_to_r1((h_r0, h_r1), map_unb2))
+
+        map_unb1 = torch.stack([map_b1[1], map_b1[0]], dim=0)
+        h_r2_reconstructed = torch.relu(self.unpool_r1_to_res2((h_r1_reconstructed, h_r2), map_unb1))
+
+        # Step 5: Map decoded states back to physical values
+        out_flat = self.fine_decoder(h_r2_reconstructed)
+        return out_flat.view(batch_size, num_nodes_r2)
 
     def compute_weighted_loss(self, pred, target):
         loss_matrix = (pred - target) ** 2

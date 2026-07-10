@@ -1,106 +1,90 @@
+import os
 import argparse
 import xarray as xr
 import torch
 import numpy as np
 import h3
 
-def build_hierarchical_graphs(input_nc):
-    print(f"Opening data layout file to discover spatial grid coordinates: {input_nc}")
-    ds = xr.open_dataset(input_nc)
-    
-    # 1. READ FINE NODES (Resolution 2)
-    # Ensure we have the actual hex string IDs. If they are stored as integers/strings, fetch them.
-    if 'h3_index' in ds:
-        fine_hexes = [str(x) for x in ds['h3_index'].values]
-    else:
-        # Fallback: if your dataset uses an index array, generate hexes from lat/lon positions
-        lats = ds['latitude'].values.squeeze()
-        lons = ds['longitude'].values.squeeze()
-        fine_hexes = [h3.latlng_to_cell(lat, lon, 2) for lat, lon in zip(lats, lons)]
-        
-    num_fine_nodes = len(fine_hexes)
-    # Create a mapping dictionary for quick index lookups
-    fine_hex_to_idx = {hex_id: i for i, hex_id in enumerate(fine_hexes)}
-    print(f" -> Successfully discovered {num_fine_nodes} Fine Nodes (H3 Resolution 2)")
+class TieredH3GraphBuilder:
+    """
+    Constructs a 3-tier deep hierarchical spatial mesh layout (Res 2 -> Res 1 -> Res 0)
+    to drive multi-scale message-passing GNNs.
+    """
+    def __init__(self, res2_path: str, res1_path: str, res0_path: str, output_dir: str = "."):
+        self.paths = {2: res2_path, 1: res1_path, 0: res0_path}
+        self.output_dir = output_dir
+        self.hex_lists = {}
+        self.hex_to_idx = {}
 
-    # =====================================================================
-    # PHASE A: GENERATE FINE TO COARSE (BIPARTITE) MAPPINGS
-    # =====================================================================
-    print("Computing parent nodes at H3 Resolution 1 for the hierarchy...")
-    # Find the unique parent hex string IDs at Resolution 1
-    coarse_hexes = sorted(list(set([h3.cell_to_parent(h, 1) for h in fine_hexes])))
-    num_coarse_nodes = len(coarse_hexes)
-    coarse_hex_to_idx = {hex_id: i for i, hex_id in enumerate(coarse_hexes)}
-    print(f" -> Generated {num_coarse_nodes} Coarse Nodes (H3 Resolution 1)")
+    def load_all_resolutions(self) -> None:
+        print("[INIT] Loading 3-Tier resolution structures from disk...")
+        for res, path in self.paths.items():
+            with xr.open_dataset(path) as ds:
+                hexes = [str(x) for x in ds['h3_index'].values]
+                # Keep original order to ensure perfect feature mapping later
+                self.hex_lists[res] = hexes
+                self.hex_to_idx[res] = {hex_id: i for i, hex_id in enumerate(hexes)}
+            print(f" -> Resolution {res}: Found {len(self.hex_lists[res])} nodes.")
 
-    print("Building Fine-to-Coarse (Bipartite Pooling) edge indexing maps...")
-    f2c_src = []
-    f2c_dst = []
-    
-    for fine_hex in fine_hexes:
-        parent_hex = h3.cell_to_parent(fine_hex, 1)
-        
-        fine_idx = fine_hex_to_idx[fine_hex]
-        coarse_idx = coarse_hex_to_idx[parent_hex]
-        
-        # Direction: From Fine Node index to Coarse Node index
-        f2c_src.append(fine_idx)
-        f2c_dst.append(coarse_idx)
-        
-    edge_index_f2c = torch.tensor([f2c_src, f2c_dst], dtype=torch.long)
+    def build_bipartite_map(self, fine_res: int, coarse_res: int) -> torch.Tensor:
+        print(f"[MAP] Generating structural pooling index: Res {fine_res} -> Res {coarse_res}...")
+        src, dst = [], []
+        fine_hexes = self.hex_lists[fine_res]
+        coarse_lookup = self.hex_to_idx[coarse_res]
 
-    # =====================================================================
-    # PHASE B: GENERATE CORE FINE GRIDS CONNECTIONS (Original Layout)
-    # =====================================================================
-    print("Building localized Fine Grid (Res 2) edge connections...")
-    fine_src = []
-    fine_dst = []
-    for fine_hex in fine_hexes:
-        fine_idx = fine_hex_to_idx[fine_hex]
-        # Get immediate neighboring cells at resolution 2
-        neighbors = h3.grid_ring(fine_hex, 1)
-        for nb in neighbors:
-            if nb in fine_hex_to_idx:  # Check if neighbor is in our dataset
-                fine_src.append(fine_idx)
-                fine_dst.append(fine_hex_to_idx[nb])
-                
-    edge_index_fine = torch.tensor([fine_src, fine_dst], dtype=torch.long)
+        for fine_hex in fine_hexes:
+            parent_hex = h3.cell_to_parent(fine_hex, coarse_res)
+            if parent_hex in coarse_lookup:
+                src.append(self.hex_to_idx[fine_res][fine_hex])
+                dst.append(coarse_lookup[parent_hex])
+        return torch.tensor([src, dst], dtype=torch.long)
 
-    # =====================================================================
-    # PHASE C: GENERATE CORE COARSE GRIDS CONNECTIONS (Macro Layout)
-    # =====================================================================
-    print("Building global Coarse Grid (Res 1) edge connections...")
-    coarse_src = []
-    coarse_dst = []
-    for coarse_hex in coarse_hexes:
-        coarse_idx = coarse_hex_to_idx[coarse_hex]
-        # Get immediate neighboring cells at resolution 1
-        neighbors = h3.grid_ring(coarse_hex, 1)
-        for nb in neighbors:
-            if nb in coarse_hex_to_idx:
-                coarse_src.append(coarse_idx)
-                coarse_dst.append(coarse_hex_to_idx[nb])
-                
-    edge_index_coarse = torch.tensor([coarse_src, coarse_dst], dtype=torch.long)
+    def build_grid_ring_edges(self, res: int) -> torch.Tensor:
+        print(f"[EDGES] Generating horizontal mixing graph for Resolution {res}...")
+        src, dst = [], []
+        hex_list = self.hex_lists[res]
+        lookup = self.hex_to_idx[res]
 
-    # =====================================================================
-    # PHASE D: SERIALIZE TENSORS TO DISK
-    # =====================================================================
-    print("\nSaving completed structural geometry graphs to disk...")
-    torch.save(edge_index_fine, "h3_edge_index.pt")
-    torch.save(edge_index_coarse, "coarse_edge_index.pt")
-    torch.save(edge_index_f2c, "fine_to_coarse_edge_index.pt")
-    
-    print("-" * 60)
-    print(f"SUCCESS: Graphs compiled!")
-    print(f" -> fine_edge_index.pt shape:          {edge_index_fine.shape}")
-    print(f" -> coarse_edge_index.pt shape:        {edge_index_coarse.shape}")
-    print(f" -> fine_to_coarse_edge_index.pt shape: {edge_index_f2c.shape}")
-    print("-" * 60)
+        for hex_id in hex_list:
+            node_idx = lookup[hex_id]
+            for neighbor in h3.grid_ring(hex_id, 1):
+                if neighbor in lookup:
+                    src.append(node_idx)
+                    dst.append(lookup[neighbor])
+        return torch.tensor([src, dst], dtype=torch.long)
+
+    def compile(self) -> None:
+        self.load_all_resolutions()
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # 1. Generate Horizontal mixing topologies for each graph layer
+        edges_res2 = self.build_grid_ring_edges(2)
+        edges_res1 = self.build_grid_ring_edges(1)
+        edges_res0 = self.build_grid_ring_edges(0)
+
+        # 2. Generate Vertical spatial pooling indexes
+        map_res2_to_res1 = self.build_bipartite_map(2, 1)
+        map_res1_to_res0 = self.build_bipartite_map(1, 0)
+
+        # 3. Serialize all arrays to disk
+        torch.save(edges_res2, os.path.join(self.output_dir, "edge_index_res2.pt"))
+        torch.save(edges_res1, os.path.join(self.output_dir, "edge_index_res1.pt"))
+        torch.save(edges_res0, os.path.join(self.output_dir, "edge_index_res0.pt"))
+        torch.save(map_res2_to_res1, os.path.join(self.output_dir, "map_res2_to_res1.pt"))
+        torch.save(map_res1_to_res0, os.path.join(self.output_dir, "map_res1_to_res0.pt"))
+        print(f"\nSUCCESS: 3-Resolution Graph Architecture saved to '{self.output_dir}'!\n")
+
+def main():
+    parser = argparse.ArgumentParser(description="3-Tier Hierarchical Graph Component Compiler.")
+    parser.add_argument("--res2", required=True, help="Path to global_h3_res2_with_bounds.nc")
+    parser.add_argument("--res1", required=True, help="Path to global_h3_res1_with_bounds.nc")
+    parser.add_argument("--res0", required=True, help="Path to global_h3_res0_with_bounds.nc")
+    parser.add_argument("-o", "--output_dir", default=".", help="Where to save compiled graph tensors")
+    args = parser.parse_args()
+
+    builder = TieredH3GraphBuilder(args.res2, args.res1, args.res0, args.output_dir)
+    builder.compile()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate Multi-Resolution Hierarchical H3 Edge Tensors.")
-    parser.add_argument("-i", "--input", required=True, help="Path to sample reference netcdf file containing hex locations")
-    args = parser.parse_args()
-    
-    build_hierarchical_graphs(args.input)
+    main()
+

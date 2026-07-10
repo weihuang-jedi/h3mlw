@@ -30,9 +30,7 @@ Setup a toy AI air temperature modeil.
       -c 32 -l 3
 
 7. build graph
-   python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc
-
-   python new_l3_build_graph.py \
+   python build_graph.py \
       --res0 ../data/global_h3_res0_with_bounds.nc \
       --res1 ../data/global_h3_res1_with_bounds.nc \
       --res2 ../data/global_h3_res2_with_bounds.nc \
@@ -66,3 +64,82 @@ Setup a toy AI air temperature modeil.
 15. another quick view
     python ../utils/plot_forecast_comparison.py -t ../data/air.sfc.2000.nc -p autoregressive_forecast.nc -s 0
     python ../utils/plot_forecast_comparison.py -t ../data/air.sfc.2000.nc -p reconstructed_air_sfc_2000.nc -s 3
+
+When scaling up to operational-grade weather AI architectures, identifying the correct variable names or mathematical parameterizations for these features is crucial.
+
+Depending on whether you are referring to **standard meteorological datasets (like ERA5 / NOAA)** or **the parameters inside your PyTorch code**, here is the exact breakdown for all three:
+
+---
+
+## 1. Land-Sea Mask (LSM)
+
+The land-sea mask is a static, fractional boundary field used to tell the model how much of a grid cell is land versus ocean. This controls thermal inertia (since land heats up and cools down much faster than water).
+
+* **ERA5 / ECMWF Variable Code:** `lsm`
+* **NCAR / NOAA GFS Name:** `LAND` or `land` (often stored as binary 0 or 1, or fractional values between 0 and 1).
+* **In your PyTorch code:** It is a **static node feature**. In your dataset, it is currently represented as:
+```python
+raw_lsm = torch.tensor(self.ds['land_sea_mask'].values.squeeze(), dtype=torch.float32) - 0.5
+
+```
+
+
+*(Subtracting 0.5 centers the data around 0, which helps GNN weight convergence).*
+
+---
+
+## 2. Solar Radiation (Forcings)
+
+Instead of forcing a model to look up raw surface solar radiation variables (which are highly unstable and can lead to error compounding), models like GraphCast and AIFS compute **Top-of-Atmosphere (TOA) incident solar radiation** analytically based purely on geometry.
+
+This is tracked via **4 dynamic forcing parameters** (phases) calculated per node based on the time of year and the local time of day:
+
+* **Annual Components (2 Parameters):**
+
+$$\sin\left(\frac{2\pi \cdot \text{day\_of\_year}}{365.25}\right), \quad \cos\left(\frac{2\pi \cdot \text{day\_of\_year}}{365.25}\right)$$
+
+
+
+*Captures seasonal sun-angle variations (e.g., Summer vs. Winter).*
+* **Diurnal Components (2 Parameters):**
+
+$$\sin(\text{local\_solar\_hour\_angle}), \quad \cos(\text{local\_solar\_hour\_angle})$$
+
+
+
+*Captures daily day/night variations based on the node's explicit longitude.*
+* **In your PyTorch code:** These match the `x_solar[:, 0:4]` dimensions appended to your input tensors.
+
+---
+
+## 3. Latitude Variations (Spatial Loss Weights)
+
+Because a spherical globe cannot be flattened perfectly, grid points near the poles cover a much smaller physical surface area than grid points near the equator. If you treat all nodes equally, your model will over-optimize for the poles and perform terribly at the tropics.
+
+To fix this, weather AI models parameterize latitude variance as a **spatial loss weight factor** applied to the Mean Squared Error (MSE).
+
+* **The Parameter Equation:** 
+$$\text{Weight} = \cos(\text{latitude in radians})$$
+
+
+* **In your PyTorch code:** This is registered as a persistent tensor buffer (`self.spatial_loss_weights`) inside your network initialization block:
+```python
+weights = np.cos(np.radians(lats))
+weights /= weights.mean()  # Scales the average weight back to 1.0
+self.register_buffer("spatial_loss_weights", torch.from_numpy(weights).float())
+
+```
+
+
+
+---
+
+### How They Fit Together in the Multi-Level Architecture
+
+When you look at your updated `in_channels = history_steps + 2 + 4` structure:
+
+* `history_steps`: Your dynamic, evolving weather fields (like air temperature).
+* `+ 2`: Static parameter layout (**Land-Sea Mask** and **Normalized Elevation**).
+* `+ 4`: Time-dependent geometric forcing parameters (**Solar Radiation angles**).
+
+The **Latitude variations** do not enter the model as an input feature; instead, they act as an external scaling parameter during the backpropagation step to ensure your GAT layers prioritize accurate global weather physics over sheer grid density!

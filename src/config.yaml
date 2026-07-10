@@ -1,23 +1,24 @@
 paths:
   data_pattern: "../data/global_h3_20years.zarr"
   checkpoint_dir: "checkpoints"
-  
-  # 1. GRAPH TOPOLOGY PATHS (Update this section)
-  edge_index_pt: "h3_edge_index.pt"                             # High-res Fine Graph
-  coarse_edge_index_pt: "coarse_edge_index.pt"                 # Low-res Global Graph
-  fine_to_coarse_edge_index_pt: "fine_to_coarse_edge_index.pt" # Bipartite Pooling Map
+  # Updated 3-Tier Architecture Layout Files
+  edge_res2: "../data/edge_index_res2.pt"
+  edge_res1: "../data/edge_index_res1.pt"
+  edge_res0: "../data/edge_index_res0.pt"
+  map_r2_to_r1: "../data/map_res2_to_res1.pt"
+  map_r1_to_r0: "../data/map_res1_to_res0.pt"
 
 model_params:
   history_steps: 2
   forecast_offset: 1
-  hidden_channels: 128   # This dictates your latent_dim (e.g., 128)
+  hidden_channels: 128
   attention_heads: 4
   learning_rate: 0.0005
   max_lr: 0.002
 
 training_params:
-  batch_size: 4
+  batch_size: 2
   num_workers: 4
-  max_epochs: 10
+  max_epochs: 20
   noise_injection_scale: 0.02
   train_rollout_steps: 3
