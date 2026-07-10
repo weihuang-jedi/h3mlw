@@ -1,0 +1,19 @@
+Setup a toy AI air temperature modeil.
+
+1. setup a conda env (based on anemoi, or NOAA/EPIC EAGLE):
+   EAGLEhome=/scratch5/purged/Wei.Huang/src/EAGLE
+   source ${EAGLEhome}/conda/etc/profile.d/conda.sh
+   eval "$(mamba shell hook --shell bash)"
+   mamba activate anemoi
+
+2. run utils/gen-global.py 
+   to generate h3 grid.
+   python gen-global.py --resolution 2 --output_dir ./ --filename global_h3_res2.geojson
+
+3. convert geojson to netcdf file:
+   python geojson2netcdf.py -i global_h3_res2.geojson -o global_h3_res2_with_bounds.nc [-v air_h3]
+
+4. append static geography data:
+   python append_to_master_grid.py \
+      -g global_h3_res2_with_bounds.nc \
+      -e ../data/ETOPO_2022_v1_60s_N90W180_geoid.nc
