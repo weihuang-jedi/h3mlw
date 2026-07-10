@@ -32,6 +32,12 @@ Setup a toy AI air temperature modeil.
 7. build graph
    python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc
 
+   python new_l3_build_graph.py \
+      --res0 ../data/global_h3_res0_with_bounds.nc \
+      --res1 ../data/global_h3_res1_with_bounds.nc \
+      --res2 ../data/global_h3_res2_with_bounds.nc \
+      -o ../data
+
 8. training
    edit config.yaml
    sbatch training.slurm
@@ -45,7 +51,8 @@ Setup a toy AI air temperature modeil.
     python ../utils/plot_loss_function.py
 
 11. evaluate accuracy
-    python ../utils/evaluate_acc.py
+    python ../utils/evaluate_acc.py -t ../data/global_h3_res2_air_sfc_2000.nc -p h3_autoregressive_forecast.nc
+    python ../utils/evaluate_acc.py -t ../data/air.sfc.2000.nc -p autoregressive_forecast.nc -v air
 
 12. reconstruct back to lat-lon regular grid
     python ../utils/interpolate2latlon.py -i h3_autoregressive_forecast.nc -o autoregressive_forecast.nc -t ../data/air.sfc.2000.nc -w 4
@@ -56,3 +63,6 @@ Setup a toy AI air temperature modeil.
 14. quick view of forecast
     python ../utils/plot_regular_grid.py -i autoregressive_forecast.nc -s
 
+15. another quick view
+    python ../utils/plot_forecast_comparison.py -t ../data/air.sfc.2000.nc -p autoregressive_forecast.nc -s 0
+    python ../utils/plot_forecast_comparison.py -t ../data/air.sfc.2000.nc -p reconstructed_air_sfc_2000.nc -s 3
