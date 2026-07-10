@@ -1,3 +1,10 @@
+0. setup env
+
+   EAGLEhome=/scratch5/purged/Wei.Huang/src/EAGLE
+   source ${EAGLEhome}/conda/etc/profile.d/conda.sh
+   eval "$(mamba shell hook --shell bash)"
+   mamba activate anemoi
+
 1. build_icosahedral_mesh.py
 
    python build_icosahedral_mesh.py -k 3 -o google-graphcast-grid
@@ -31,4 +38,19 @@
 
    python build_icosahedral_hierarchy.py -k 4 -o google-graphcast-grid
 
+7. train
+
+   python python training_on_icosahedral_grid.py -c config.yaml
+
+8. reconstruct lat-lon grid
+
+   python icosahedral2regular.py -i google-graphcast-grid/global_icosahedral_m4_air_2000.nc  -o google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc -r 2.0
+
+9. compare with original lat-lon grid data
+
+   python plot_comparison.py \
+     --original ../data/air.sfc.2000.nc \
+     --reconstructed google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc \
+     --image network_diagnostic_check.png \
+     --time_index 0
 
