@@ -37,11 +37,11 @@ class FastMultiYearH3Dataset(Dataset):
         raw_lsm = torch.tensor(self.ds['land_sea_mask'].values.squeeze(), dtype=torch.float32) - 0.5
         raw_elv = torch.tensor(self.ds['elevation'].values.squeeze(), dtype=torch.float32)
         norm_elv = torch.nan_to_num((raw_elv - raw_elv.mean()) / (raw_elv.std() + 1e-6), nan=0.0)
-        self.static_features = torch.stack([raw_lsm, norm_elv], dim=1) 
+        self.static_features = torch.stack([raw_lsm, norm_elv], dim=1)
 
         self.times = self.ds['time'].values
         self.lons = self.ds['longitude'].values.squeeze()
-        self.lats = self.ds['latitude'].values.squeeze() # Extracted for Latitude Weighting
+        self.lats = self.ds['latitude'].values.squeeze() 
         self.num_times = len(self.times)
         self.num_nodes = len(self.lons)
 
@@ -73,7 +73,7 @@ class FastMultiYearH3Dataset(Dataset):
         x_solar[:, 3] = np.cos(day_phase)
 
         x_combined = torch.cat([norm_x_air, self.static_features, x_solar], dim=1)
-        return x_combined, y, idx # Pass index to help compute rolling time vectors inside training loops
+        return x_combined, y, idx
 
 class MultiYearH3DataModule(pl.LightningDataModule):
     def __init__(self, config, data_path):
@@ -103,8 +103,27 @@ class MultiYearH3DataModule(pl.LightningDataModule):
                           shuffle=False, num_workers=self.cfg['training_params']['num_workers'],
                           pin_memory=True)
 
+
 # =====================================================================
-# 2. UPGRADED MULTI-LEVEL HIERARCHICAL LIGHTNING MODULE
+# 2. GRAPHCAST/AIFS INSPIRED DEEP RESIDUAL PROCESSOR BLOCK
+# =====================================================================
+class ResidualProcessorBlock(nn.Module):
+    def __init__(self, latent_dim, heads=4):
+        super().__init__()
+        # Stable deep message passing with multi-head spatial attention
+        self.gat = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, heads=heads, concat=False)
+        self.norm = nn.LayerNorm(latent_dim)
+        self.act = nn.SiLU() # SiLU (Swish) is standard in GraphCast/AIFS architectures
+
+    def forward(self, x, edge_index):
+        residual = x
+        x = self.gat(x, edge_index)
+        x = self.act(x)
+        return self.norm(x + residual) # Clean residual addition stabilizes gradient flow
+
+
+# =====================================================================
+# 3. HIGH-PERFORMANCE HIERARCHICAL WEATHER MODEL PIPELINE
 # =====================================================================
 class SingleGPUH3WeatherGAT(pl.LightningModule):
     def __init__(self, config, lats=None, lons=None):
@@ -120,84 +139,79 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
         else:
             self.register_buffer("spatial_loss_weights", None)
 
-        # 2. LOAD ALL THREE TOPOLOGY GRAPH TIERS
-        # NOTE: You will need to add these paths to your config.yaml
+        # 2. Load Multi-Resolution Topology Graph Tiers
         edge_fine = torch.load(self.cfg['paths']['edge_index_pt'], map_location="cpu")
         edge_coarse = torch.load(self.cfg['paths']['coarse_edge_index_pt'], map_location="cpu")
         edge_f2c = torch.load(self.cfg['paths']['fine_to_coarse_edge_index_pt'], map_location="cpu")
-
+        
         self.register_buffer("edge_index_fine", edge_fine)
         self.register_buffer("edge_index_coarse", edge_coarse)
         self.register_buffer("edge_index_fine_to_coarse", edge_f2c)
 
-        # Dimensions
-        in_channels = 8  # (2 history + 2 static + 4 solar)
+        # 3. Dynamic Dimension Allocation
+        history_steps = config['model_params']['history_steps']
+        in_channels = history_steps + 2 + 4  # (history fields + 2 static features + 4 solar forcing parameters)
         latent_dim = config['model_params']['hidden_channels']
+        attn_heads = config['model_params'].get('attention_heads', 4)
 
-        # 3. INTERSECTED HIERARCHICAL NEURAL LAYERS
-        # Encoder L1 (Physical -> Local Latent)
+        # Encoder Level 1 (Physical -> Local Latent Space)
         self.fine_encoder = nn.Linear(in_channels, latent_dim)
-
-        # Encoder L2 (Bipartite Pooling GAT: Fine Grid -> Coarse Grid)
-        self.coarse_encoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, concat=False)
-
-        # Global Processor (Deep message passing on the Coarse Grid only)
-        self.processor_gat1 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, concat=False)
-        self.processor_gat2 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, concat=False)
-
-        # Decoder L1 (Bipartite Unpooling GAT: Coarse Grid -> Fine Grid)
-        self.coarse_decoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, concat=False)
-
-        # Decoder L2 (Latent -> Physical Temperature Output)
+        
+        # Encoder Level 2 (Bipartite Graph Compression: Fine Grid -> Coarse Grid)
+        self.coarse_encoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
+        
+        # 4. DEEP PROCESSOR STACK (GraphCast/AIFS inspired deep residual mapping)
+        # Defaulting to 4 deep layers to simulate global fluid interaction loops
+        num_processor_layers = config['training_params'].get('processor_layers', 4)
+        self.processor_stack = nn.ModuleList([
+            ResidualProcessorBlock(latent_dim=latent_dim, heads=attn_heads)
+            for _ in range(num_processor_layers)
+        ])
+        
+        # Decoder Level 1 (Bipartite Graph Expansion: Coarse Grid -> Fine Grid)
+        self.coarse_decoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, heads=attn_heads, concat=False)
+        
+        # Decoder Level 2 (Latent -> Physical Temperature Variable Prediction)
         self.fine_decoder = nn.Linear(latent_dim, 1)
 
     def forward(self, x):
         # x shape: [Batch, Fine_Nodes, Features]
         batch_size, num_fine_nodes, _ = x.shape
-
-        # For multi-level batch processing, flatten batch dimensions for PyG compliance
-        # x_flat shape: [Batch * Fine_Nodes, Features]
         x_flat = x.view(-1, x.shape[-1])
 
-        # Step 1: Linear project fine features
+        # Step 1: Encode local surface physical node inputs
         h_fine = torch.relu(self.fine_encoder(x_flat))
-
-        # Vectorize Bipartite Batched Graph Edge Offsets
-        # (This scales up child-to-parent mappings cleanly across dynamic mini-batches)
+        
+        # Calculate Multi-Step Bipartite Vectorized Graph Edge Offsets
         num_coarse_nodes = int(self.edge_index_fine_to_coarse[1].max() + 1)
-
-        # Setup batched bipartite pooling matrices
+        
         f2c_offsets_fine = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index_fine_to_coarse.shape[1]) * num_fine_nodes
         f2c_offsets_coarse = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index_fine_to_coarse.shape[1]) * num_coarse_nodes
-
+        
         batched_f2c = self.edge_index_fine_to_coarse.repeat(1, batch_size)
         batched_f2c[0] += f2c_offsets_fine
         batched_f2c[1] += f2c_offsets_coarse
 
-        # Setup batched coarse-grid core matrices
         num_coarse_edges = self.edge_index_coarse.shape[1]
         coarse_offsets = torch.arange(batch_size, device=x.device).repeat_interleave(num_coarse_edges) * num_coarse_nodes
         batched_coarse_edges = self.edge_index_coarse.repeat(1, batch_size) + coarse_offsets
 
-        # Initialize global latent pools
+        # Initialize coarse global canvas
         h_coarse_init = torch.zeros((num_coarse_nodes * batch_size, h_fine.shape[-1]), device=x.device)
-
-        # Step 2: Pool up to Coarse Architecture via Bipartite maps
+        
+        # Step 2: Pool information up into the Coarse Macro Tiers via Bipartite maps
         h_coarse = torch.relu(self.coarse_encoder((h_fine, h_coarse_init), batched_f2c))
-
-        # Step 3: Deep Processing on macro-climate scales
-        h_coarse = torch.relu(self.processor_gat1(h_coarse, batched_coarse_edges))
-        h_coarse = torch.relu(self.processor_gat2(h_coarse, batched_coarse_edges))
-
-        # Step 4: Unpool back down to fine spatial distribution dimensions
-        # Inverse Bipartite edges map by flipping row indices [1, 0]
+        
+        # Step 3: Deep Residual Processing on macro-climate grid configurations
+        for layer in self.processor_stack:
+            h_coarse = layer(h_coarse, batched_coarse_edges)
+        
+        # Step 4: Unpool information back down to fine local spatial tracking matrices
         batched_c2f = torch.stack([batched_f2c[1], batched_f2c[0]], dim=0)
         h_fine_reconstructed = torch.relu(self.coarse_decoder((h_coarse, h_fine), batched_c2f))
-
-        # Step 5: Decode back to physical Kelvin predictions
+        
+        # Step 5: Decode back to physical Kelvin values
         out_flat = self.fine_decoder(h_fine_reconstructed)
-
-        # Reshape cleanly back to PyTorch Lightning batch formatting
         return out_flat.view(batch_size, num_fine_nodes)
 
     def compute_weighted_loss(self, pred, target):
@@ -206,24 +220,18 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
             loss_matrix = loss_matrix * self.spatial_loss_weights.unsqueeze(0)
         return loss_matrix.mean()
 
-    def _generate_solar_for_step(self, base_idx, step_offset, batch_size, num_nodes, device):
-        """Helper to generate solar arrays dynamically during multi-step unrolling."""
-        hours_offset = (step_offset + 1) * 3
-        x_solar = torch.zeros((batch_size, num_nodes, 4), device=device)
-        return x_solar
-
     def training_step(self, batch, batch_idx):
-        x, y_true_start, start_indices = batch
+        x, y_true_start, _ = batch
         batch_size, num_nodes, _ = x.shape
         history_steps = self.cfg['model_params']['history_steps']
 
-        # Inject Gaussian Noise to prevent AR Explosions
+        # Inject Gaussian Noise to mitigate Auto-Regressive error compounding
         noise_scale = self.cfg['training_params'].get('noise_injection_scale', 0.02)
         if self.training and noise_scale > 0:
             noise = torch.randn_like(x[:, :, :history_steps]) * noise_scale
             x[:, :, :history_steps] = x[:, :, :history_steps] + noise
 
-        # Multi-Step Rollout Training Horizon
+        # Multi-Step Rollout Training Horizon Loop
         rollout_steps = self.cfg['training_params'].get('train_rollout_steps', 3)
         total_loss = 0.0
 
@@ -231,7 +239,7 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
         static_features = x[:, :, history_steps : history_steps+2].clone()
 
         for step in range(rollout_steps):
-            x_solar = x[:, :, history_steps+2:].clone()
+            x_solar = x[:, :, history_steps+2:].clone() 
 
             x_input = torch.cat([current_history, static_features, x_solar], dim=2)
             y_hat = self(x_input)
@@ -273,15 +281,11 @@ class SingleGPUH3WeatherGAT(pl.LightningModule):
         return [optimizer], [scheduler_config]
 
 # =====================================================================
-# 3. CUSTOM STAGE & WALL-CLOCK TIMING PROGRESS LOGGER
+# 4. CUSTOM STAGE & WALL-CLOCK TIMING PROGRESS LOGGER
 # =====================================================================
 class ProgressStageTracker(Callback):
-    """
-    A validation callback that prints step processing speeds and elapsed times.
-    Use this to accurately calculate your Slurm wall-time clock requirements.
-    """
     def __init__(self):
-        super().__init__()  # <--- Added the missing underscores
+        super().__init__()
         self.epoch_start_time = 0
         self.batch_start_time = 0
 
@@ -305,12 +309,12 @@ class ProgressStageTracker(Callback):
         print(f" -> Projected time required for 5 epochs: {(epoch_duration * 5) / 3600.0:.2f} hours.\n")
 
 # =====================================================================
-# 4. ARGPARSE SCRIPT LAUNCH CONTROLLER
+# 5. ARGPARSE SCRIPT LAUNCH CONTROLLER
 # =====================================================================
 def main():
-    parser = argparse.ArgumentParser(description="NOAA EPIC-Style Vectorized GATv2 Weather Model Training.")
-    parser.add_argument("-i", "--input", required=True, help="Path to input training data folder (.zarr) or NetCDF pattern")
-    parser.add_argument("-c", "--config", default="config.yaml", help="Path to operational configuration YAML file")
+    parser = argparse.ArgumentParser(description="Operational Hierarchical H3 Graph Neural Weather Model.")
+    parser.add_argument("-i", "--input", required=True, help="Path to input training data (.zarr)")
+    parser.add_argument("-c", "--config", default="config.yaml", help="Path to config YAML file")
     args = parser.parse_args()
 
     print(f"Reading configuration file: {args.config}")
@@ -320,12 +324,10 @@ def main():
     datamodule = MultiYearH3DataModule(config, data_path=args.input)
     datamodule.setup()
 
-    # Extract coordinates directly from data layout layers to populate loss weighting metrics
     lats = datamodule.full_dataset.lats
     lons = datamodule.full_dataset.lons
 
     model = SingleGPUH3WeatherGAT(config, lats=lats, lons=lons)
-
     stage_tracker = ProgressStageTracker()
 
     checkpoint_callback = ModelCheckpoint(
@@ -340,8 +342,27 @@ def main():
         precision="32", log_every_n_steps=50, gradient_clip_val=0.3
     )
 
-    print("Launching AI Pipeline Model Fit Execution Block...")
-    trainer.fit(model, datamodule=datamodule)
+    # DEFINE THE PATH TO YOUR SAVED CHECKPOINT
+    # For example, loading the best model saved by the ModelCheckpoint callback
+    checkpoint_to_resume = "checkpoints/best-h3-20year-cyclic-model.ckpt"
+
+    if os.path.exists(checkpoint_to_resume):
+        print(f"FOUND CHECKPOINT! Resuming training from: {checkpoint_to_resume}")
+        n = 1
+        new_checkpoint_to_resume = f"checkpoints/best-h3-20year-cyclic-model.ckpt.{n}"
+        while os.path.exists(new_checkpoint_to_resume):
+            n += 1
+            new_checkpoint_to_resume = f"checkpoints/best-h3-20year-cyclic-model.ckpt.{n}"
+        os.rename(checkpoint_to_resume, new_checkpoint_to_resume)
+        # Pass the path to ckpt_path to restore optimizers, schedulers, and epoch counters
+        trainer.fit(model, datamodule=datamodule, ckpt_path=new_checkpoint_to_resume)
+    else:
+        print("No checkpoint found. Launching a brand fresh training loop...")
+        trainer.fit(model, datamodule=datamodule)
+
+    # print("Launching AI Pipeline Model Fit Execution Block...")
+    # trainer.fit(model, datamodule=datamodule)
 
 if __name__ == "__main__":
     main()
+

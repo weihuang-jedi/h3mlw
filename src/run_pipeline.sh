@@ -5,8 +5,8 @@ set -x
 # 1. Submit the training job and extract its Slurm Job ID
 # (Assuming your first script is named 'training.slurm')
 rm -r log.training.out
-rm -rf ../data/checkpoints/*
-rm -rf lightning_logs/*
+#rm -rf ../data/checkpoints/*
+#rm -rf lightning_logs/*
 TRAINING_MSG=$(sbatch training.slurm)
 echo "$TRAINING_MSG"
 

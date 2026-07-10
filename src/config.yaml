@@ -18,6 +18,6 @@ model_params:
 training_params:
   batch_size: 2
   num_workers: 4
-  max_epochs: 5
+  max_epochs: 20
   noise_injection_scale: 0.02
   train_rollout_steps: 3

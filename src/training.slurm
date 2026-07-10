@@ -35,8 +35,8 @@ then
     python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc
 fi
 
-rm -f ../data/checkpoints/*
-rm -rf lightning_logs/*
+#rm -f ../data/checkpoints/*
+#rm -rf lightning_logs/*
 
 # Step 3: Create the Complete PyTorch Training Pipeline (train_distributed.py)
 python train_single_gpu.py -i ../data/global_h3_20years.zarr -c config.yaml

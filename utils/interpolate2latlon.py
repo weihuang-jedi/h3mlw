@@ -1,4 +1,5 @@
 import argparse
+import os
 import xarray as xr
 import numpy as np
 from scipy.interpolate import griddata
@@ -12,7 +13,7 @@ def _interpolate_single_time_step(t_idx, h3_vals_3d, points, lon_mesh, lat_mesh)
     """
     # Isolate the 1D spatial vector for this specific time index
     h3_slice = h3_vals_3d[t_idx, :]
-    
+
     # 1. Primary linear interpolation pass
     recon_2d = griddata(points, h3_slice, (lon_mesh, lat_mesh), method='linear')
 
@@ -21,12 +22,12 @@ def _interpolate_single_time_step(t_idx, h3_vals_3d, points, lon_mesh, lat_mesh)
     if np.any(nan_mask):
         fallback_2d = griddata(points, h3_slice, (lon_mesh, lat_mesh), method='nearest')
         recon_2d[nan_mask] = fallback_2d[nan_mask]
-        
+
     return t_idx, recon_2d
 
 class H3ToLatLonInterpolator:
     """
-    A class module to reverse-interpolate multi-temporal unstructured 1D H3 grid data 
+    A class module to reverse-interpolate multi-temporal unstructured 1D H3 grid data
     back into a structured 3D lat/lon rectangular matrix series using a template.
     """
     def __init__(self, input_path: str, output_path: str, template_path: str, num_workers: int = None):
@@ -37,7 +38,7 @@ class H3ToLatLonInterpolator:
         self.output_path = output_path
         self.template_path = template_path
         self.num_workers = num_workers if num_workers else max(1, cpu_count() - 1)
-        
+
         self.ds_h3 = None
         self.ds_template = None
         self.var_name = None
@@ -58,7 +59,7 @@ class H3ToLatLonInterpolator:
         template_vars = list(set(self.ds_template.data_vars.keys()) - coords_keys)
         if not template_vars:
             raise KeyError("Could not detect a valid variable in the template NetCDF file.")
-        
+
         # Enforce raw string unpacking from list
         self.var_name = template_vars[0] if isinstance(template_vars, list) else template_vars
         print(f" -> Detected weather variable name from template: '{self.var_name}'")
@@ -68,7 +69,7 @@ class H3ToLatLonInterpolator:
         h3_vars = list(set(self.ds_h3.data_vars.keys()) - h3_coords_keys)
         if not h3_vars:
             raise KeyError("Could not detect a valid data variable in the H3 input file.")
-        
+
         # Pull the raw string element directly from the list mapping sequence
         self.h3_var_key = h3_vars[0] if isinstance(h3_vars, list) else h3_vars
         print(f" -> Mapping H3 source variable column: '{self.h3_var_key}'")
@@ -83,9 +84,9 @@ class H3ToLatLonInterpolator:
         # Extract source coordinates and full multi-temporal values explicitly from the DataArray
         h3_lons = self.ds_h3['longitude'].values
         h3_lats = self.ds_h3['latitude'].values
-        
+
         # Pull data array from the isolated DataArray container specifically
-        h3_vals_3d = self.ds_h3[self.h3_var_key].values 
+        h3_vals_3d = self.ds_h3[self.h3_var_key].values
 
         if h3_vals_3d.ndim == 1:
             # Fallback if a single-frame file is passed: expand to 2D matrix
@@ -144,8 +145,9 @@ class H3ToLatLonInterpolator:
         long_name = template_attr.get("long_name", self.var_name.upper())
         units = template_attr.get("units", "unknown")
 
-        # Slice the matching time coordinates up to the generated rollout depth
-        time_coords = self.ds_template['time'].values[:matrix_3d.shape[0]]
+        # CRITICAL FIX: Extract timeline arrays and metadata directly from the source forecast file
+        time_coords = self.ds_h3['time'].values
+        time_attrs = self.ds_h3['time'].attrs
 
         ds_output = xr.Dataset(
             data_vars={
@@ -161,7 +163,7 @@ class H3ToLatLonInterpolator:
                 )
             },
             coords={
-                "time": time_coords,
+                "time": ("time", time_coords, time_attrs), # Attach coordinates alongside structural attributes
                 "lat": lats,
                 "lon": lons
             },
@@ -193,8 +195,8 @@ def main():
     args = parser.parse_args()
 
     processor = H3ToLatLonInterpolator(
-        input_path=args.input, 
-        output_path=args.output, 
+        input_path=args.input,
+        output_path=args.output,
         template_path=args.template,
         num_workers=args.workers
     )

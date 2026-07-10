@@ -11,5 +11,5 @@ model_params:
   steps_per_day: 8       
 
 forecast_settings:
-  forecast_start_time: "2000-01-01 00:00:00"
+  forecast_start_time: "2000-07-01 00:00:00"
   forecast_days: 5
