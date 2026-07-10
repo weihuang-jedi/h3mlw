@@ -1,22 +1,23 @@
 paths:
   data_pattern: "../data/global_h3_20years.zarr"
-  edge_index_pt: "h3_edge_index.pt"
-  checkpoint_dir: "checkpoints/"
+  checkpoint_dir: "checkpoints"
+  
+  # 1. GRAPH TOPOLOGY PATHS (Update this section)
+  edge_index_pt: "h3_edge_index.pt"                             # High-res Fine Graph
+  coarse_edge_index_pt: "coarse_edge_index.pt"                 # Low-res Global Graph
+  fine_to_coarse_edge_index_pt: "fine_to_coarse_edge_index.pt" # Bipartite Pooling Map
 
 model_params:
   history_steps: 2
-  static_features: 2       
-  solar_features: 4        
   forecast_offset: 1
-  learning_rate: 0.0001    # Base minimal boundary LR
-  max_lr: 0.0006           # Peak boundary learning rate for your cyclic scheduler
-  hidden_channels: 32
+  hidden_channels: 128   # This dictates your latent_dim (e.g., 128)
   attention_heads: 4
+  learning_rate: 0.0005
+  max_lr: 0.002
 
 training_params:
   batch_size: 2
   num_workers: 4
   max_epochs: 5
-  # ADVANCED ML IMPLEMENTATIONS
-  noise_injection_scale: 0.02   # Standard deviation of Gaussian noise added to inputs
-  train_rollout_steps: 3         # Multi-step unrolling loss depth horizon
+  noise_injection_scale: 0.02
+  train_rollout_steps: 3

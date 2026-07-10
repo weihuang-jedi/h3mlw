@@ -32,7 +32,7 @@ echo "Launching Single-GPU training run on node: $SLURMD_NODENAME"
 
 if [ ! -f h3_edge_index.pt ]
 then
-    python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc -o h3_edge_index.pt
+    python build_graph.py -i ../data/global_h3_res2_air_sfc_1976.nc
 fi
 
 rm -f ../data/checkpoints/*

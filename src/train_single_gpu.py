@@ -104,88 +104,105 @@ class MultiYearH3DataModule(pl.LightningDataModule):
                           pin_memory=True)
 
 # =====================================================================
-# 2. UPGRADED LIGHTNING MODULE WITH ADVANCED WEATHER FIXES
+# 2. UPGRADED MULTI-LEVEL HIERARCHICAL LIGHTNING MODULE
 # =====================================================================
 class SingleGPUH3WeatherGAT(pl.LightningModule):
     def __init__(self, config, lats=None, lons=None):
         super().__init__()
-        # Explicitly save it to the class object right here
         self.cfg = config
-
-        # Save to hparams container cleanly
         self.save_hyperparameters(ignore=['lats', 'lons'])
 
-        # 1. LATITUDE LOSS WEIGHTING INITIALIZATION
+        # 1. Spatial Loss Weighting Initialization
         if lats is not None:
             weights = np.cos(np.radians(lats))
-            weights /= weights.mean()  # Normalize weights around a baseline of 1.0
+            weights /= weights.mean()
             self.register_buffer("spatial_loss_weights", torch.from_numpy(weights).float())
         else:
             self.register_buffer("spatial_loss_weights", None)
 
-        if lons is not None:
-            self.register_buffer("lons_deg", torch.from_numpy(lons).float())
-        else:
-            self.register_buffer("lons_deg", None)
+        # 2. LOAD ALL THREE TOPOLOGY GRAPH TIERS
+        # NOTE: You will need to add these paths to your config.yaml
+        edge_fine = torch.load(self.cfg['paths']['edge_index_pt'], map_location="cpu")
+        edge_coarse = torch.load(self.cfg['paths']['coarse_edge_index_pt'], map_location="cpu")
+        edge_f2c = torch.load(self.cfg['paths']['fine_to_coarse_edge_index_pt'], map_location="cpu")
 
-        # Load Graph Topology
-        edge_index = torch.load(self.cfg['paths']['edge_index_pt'], map_location="cpu")
-        self.register_buffer("edge_index", edge_index)
+        self.register_buffer("edge_index_fine", edge_fine)
+        self.register_buffer("edge_index_coarse", edge_coarse)
+        self.register_buffer("edge_index_fine_to_coarse", edge_f2c)
 
         # Dimensions
         in_channels = 8  # (2 history + 2 static + 4 solar)
-        latent_dim = config['model_params']['hidden_channels'] # e.g., 128
+        latent_dim = config['model_params']['hidden_channels']
 
-        # 1. ENCODER MLP: Compress raw inputs per-node into latent space
-        self.encoder = nn.Sequential(
-            nn.Linear(in_channels, latent_dim),
-            nn.SiLU(),
-            nn.Linear(latent_dim, latent_dim)
-        )
+        # 3. INTERSECTED HIERARCHICAL NEURAL LAYERS
+        # Encoder L1 (Physical -> Local Latent)
+        self.fine_encoder = nn.Linear(in_channels, latent_dim)
 
-        # 2. PROCESSOR: Deep Graph Attention layers operating entirely in latent space
-        self.gat1 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, heads=4, concat=False)
-        self.gat2 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, heads=4, concat=False)
+        # Encoder L2 (Bipartite Pooling GAT: Fine Grid -> Coarse Grid)
+        self.coarse_encoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, concat=False)
 
-        # 3. DECODER MLP: Map latent space back down to physical weather variables (1 output: Temp)
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.SiLU(),
-            nn.Linear(latent_dim, 1)
-        )
+        # Global Processor (Deep message passing on the Coarse Grid only)
+        self.processor_gat1 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, concat=False)
+        self.processor_gat2 = GATv2Conv(in_channels=latent_dim, out_channels=latent_dim, concat=False)
+
+        # Decoder L1 (Bipartite Unpooling GAT: Coarse Grid -> Fine Grid)
+        self.coarse_decoder = GATv2Conv(in_channels=(latent_dim, latent_dim), out_channels=latent_dim, concat=False)
+
+        # Decoder L2 (Latent -> Physical Temperature Output)
+        self.fine_decoder = nn.Linear(latent_dim, 1)
 
     def forward(self, x):
-        # x shape: [Batch, Nodes, Features]
-        batch_size, num_nodes, _ = x.shape
+        # x shape: [Batch, Fine_Nodes, Features]
+        batch_size, num_fine_nodes, _ = x.shape
 
-        # Step 1: Encode node states into latent vectors
-        h = self.encoder(x) # Shape: [Batch, Nodes, Latent_Dim]
+        # For multi-level batch processing, flatten batch dimensions for PyG compliance
+        # x_flat shape: [Batch * Fine_Nodes, Features]
+        x_flat = x.view(-1, x.shape[-1])
 
-        # Flatten batch for PyG message passing
-        h_flat = h.view(-1, h.shape[-1])
+        # Step 1: Linear project fine features
+        h_fine = torch.relu(self.fine_encoder(x_flat))
 
-        # Step 2: Process spatial relationships across the graph index with inline batch math
-        num_edges = self.edge_index.shape[1]
-        local_edge_index = self.edge_index.to(x.device)
-        offsets = torch.arange(batch_size, device=x.device).repeat_interleave(num_edges) * num_nodes
-        edge_index_batched = local_edge_index.repeat(1, batch_size) + offsets
+        # Vectorize Bipartite Batched Graph Edge Offsets
+        # (This scales up child-to-parent mappings cleanly across dynamic mini-batches)
+        num_coarse_nodes = int(self.edge_index_fine_to_coarse[1].max() + 1)
 
-        # Apply GAT layers using torch.relu directly
-        h_flat = torch.relu(self.gat1(h_flat, edge_index_batched))
-        h_flat = torch.relu(self.gat2(h_flat, edge_index_batched))
+        # Setup batched bipartite pooling matrices
+        f2c_offsets_fine = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index_fine_to_coarse.shape[1]) * num_fine_nodes
+        f2c_offsets_coarse = torch.arange(batch_size, device=x.device).repeat_interleave(self.edge_index_fine_to_coarse.shape[1]) * num_coarse_nodes
 
-        # Reshape back to batch format
-        h = h_flat.view(batch_size, num_nodes, -1)
+        batched_f2c = self.edge_index_fine_to_coarse.repeat(1, batch_size)
+        batched_f2c[0] += f2c_offsets_fine
+        batched_f2c[1] += f2c_offsets_coarse
 
-        # Step 3: Decode latent vectors back to single temperature variable predictions
-        out = self.decoder(h) # Shape: [Batch, Nodes, 1]
-        return out.squeeze(-1)
+        # Setup batched coarse-grid core matrices
+        num_coarse_edges = self.edge_index_coarse.shape[1]
+        coarse_offsets = torch.arange(batch_size, device=x.device).repeat_interleave(num_coarse_edges) * num_coarse_nodes
+        batched_coarse_edges = self.edge_index_coarse.repeat(1, batch_size) + coarse_offsets
+
+        # Initialize global latent pools
+        h_coarse_init = torch.zeros((num_coarse_nodes * batch_size, h_fine.shape[-1]), device=x.device)
+
+        # Step 2: Pool up to Coarse Architecture via Bipartite maps
+        h_coarse = torch.relu(self.coarse_encoder((h_fine, h_coarse_init), batched_f2c))
+
+        # Step 3: Deep Processing on macro-climate scales
+        h_coarse = torch.relu(self.processor_gat1(h_coarse, batched_coarse_edges))
+        h_coarse = torch.relu(self.processor_gat2(h_coarse, batched_coarse_edges))
+
+        # Step 4: Unpool back down to fine spatial distribution dimensions
+        # Inverse Bipartite edges map by flipping row indices [1, 0]
+        batched_c2f = torch.stack([batched_f2c[1], batched_f2c[0]], dim=0)
+        h_fine_reconstructed = torch.relu(self.coarse_decoder((h_coarse, h_fine), batched_c2f))
+
+        # Step 5: Decode back to physical Kelvin predictions
+        out_flat = self.fine_decoder(h_fine_reconstructed)
+
+        # Reshape cleanly back to PyTorch Lightning batch formatting
+        return out_flat.view(batch_size, num_fine_nodes)
 
     def compute_weighted_loss(self, pred, target):
-        """Calculates area-weighted MSE loss based on node latitude."""
         loss_matrix = (pred - target) ** 2
         if getattr(self, "spatial_loss_weights", None) is not None:
-            # Broadcast weights across the batch axis
             loss_matrix = loss_matrix * self.spatial_loss_weights.unsqueeze(0)
         return loss_matrix.mean()
 
