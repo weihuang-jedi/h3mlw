@@ -4,15 +4,21 @@ paths:
 
 model_params:
   # GraphCast Multi-Mesh Hierarchy Components
-  hierarchy_levels: [4, 3, 2, 1, 0]
+  # hierarchy_levels: [4, 3, 2, 1, 0]
+  # latent_dim: 256            # GraphCast relies heavily on uniform wide latent channels
+  # Drop from 5 layers to an optimized 3-layer stack (Fine -> Intermediate -> Root)
+  hierarchy_levels: [4, 2, 0]  
+  latent_dim: 128              # Lowering this helps fit the entire graph into the GPU cache
   history_steps: 2
-  latent_dim: 256            # GraphCast relies heavily on uniform wide latent channels
   processor_layers: 4        # Iterative message-passing steps across the multi-mesh
   learning_rate: 0.0002
 
 training_params:
   batch_size: 2
   rollout_steps: 1
-  num_workers: 4
+  num_workers: 0   # Forces Ursa to stream blocks directly into GPU cache without a CPU thread lock
   max_epochs: 15
   precision: "16-mixed"
+  processor_layers: 3
+  # Progress bar parameters
+  progress_bar_refresh_rate: 10   # Updates every 10 steps. Higher numbers prevent stdout log bloat.

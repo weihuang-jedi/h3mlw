@@ -6,6 +6,7 @@ import torch.nn as nn
 import numpy as np
 import xarray as xr
 import pytorch_lightning as pl
+from lightning.pytorch.callbacks import TQDMProgressBar
 from torch.utils.data import Dataset, DataLoader
 
 # =====================================================================
@@ -33,13 +34,18 @@ class FastMultiYearIcosahedralDataset(Dataset):
 
     def __getitem__(self, idx):
         window_slice = slice(idx, idx + self.total_window_size)
-        raw_window = self.weather_data.isel(time=window_slice).values
         
-        x_weather = torch.from_numpy(raw_window[:self.history_steps]).float() # [history, nodes]
-        y_weather = torch.from_numpy(raw_window[self.history_steps:]).float()  # [rollout, nodes]
+        # Pulls the data pointer into memory
+        raw_window = self.weather_data.isel(time=window_slice).data
+
+        # -----------------------------------------------------------------
+        # FIXED: Wrap with torch.tensor or cast explicitly to np.array
+        # -----------------------------------------------------------------
+        x_weather = torch.tensor(np.array(raw_window[:self.history_steps]), dtype=torch.float32) # [history, nodes]
+        y_weather = torch.tensor(np.array(raw_window[self.history_steps:]), dtype=torch.float32) # [rollout, nodes]
 
         x_weather = x_weather.permute(1, 0) # [nodes, history]
-        
+
         # Combine historical frames with static land features
         static_features = torch.stack([self.lsm, self.elevation], dim=-1)
         x_features = torch.cat([x_weather, static_features], dim=-1)
@@ -265,11 +271,14 @@ class DeepGraphCastModel(pl.LightningModule):
 def main():
     parser = argparse.ArgumentParser(description="Train GraphCast-style network architecture over icosahedral grids.")
     parser.add_argument("-c", "--config", default="config.yaml")
+    # New argument to point to a checkpoint file
+    parser.add_argument("-r", "--resume", default=None, help="Path to a checkpoint file (.ckpt) to resume training from")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
+    # Initialize data pipeline components
     dataset = FastMultiYearIcosahedralDataset(
         zarr_path=config['paths']['zarr_store'],
         history_steps=config['model_params']['history_steps'],
@@ -284,16 +293,40 @@ def main():
         pin_memory=True
     )
 
-    model = DeepGraphCastModel(config=config)
-    
+    # 1. Handle Model Instantiation/Compilation
+    if args.resume is not None:
+        print(f"[RESUME] Loading model weights from checkpoint: {args.resume}")
+        # When resuming a compiled model, pass the raw instantiated architecture to torch.compile
+        raw_model = DeepGraphCastModel.load_from_checkpoint(args.resume, config=config)
+    else:
+        print("[START] Initializing new model architecture from scratch...")
+        raw_model = DeepGraphCastModel(config=config)
+
+    # Run graph optimization for Ursa's CUDA environment
+    optimized_model = torch.compile(raw_model, mode="reduce-overhead")
+
+    # 2. Setup Progress Tracking Callback
+    from lightning.pytorch.callbacks import TQDMProgressBar
+    pbar = TQDMProgressBar(
+        refresh_rate=config['training_params'].get('progress_bar_refresh_rate', 10)
+    )
+
     trainer = pl.Trainer(
         max_epochs=config['training_params']['max_epochs'],
         accelerator="gpu",
         devices=1,
-        precision=config['training_params'].get('precision', '16-mixed')
+        precision=config['training_params'].get('precision', '16-mixed'),
+        callbacks=[pbar]
     )
 
-    trainer.fit(model, dataloader)
+    # 3. Trigger Training Pipeline
+    if args.resume is not None:
+        print(f"[START] Resuming training loop at restored epoch marker from: {args.resume}")
+        # Passing ckpt_path tells the trainer to restore optimizer state and historical epoch metrics
+        trainer.fit(optimized_model, dataloader, ckpt_path=args.resume)
+    else:
+        print(f"[START] Triggering fresh model execution loop using setup file: {args.config}")
+        trainer.fit(optimized_model, dataloader)
 
 if __name__ == "__main__":
     main()

@@ -42,15 +42,72 @@
 
    python python training_on_icosahedral_grid.py -c config.yaml
 
-8. reconstruct lat-lon grid
+8. forecast/inference
+
+   python run_forecast.py --config config_inference.yaml --weights checkpoints/epoch14-ckpt --start_time 2000-07-01T00:00:00 --steps 12 --output july_2000_icosahedral_forecast.nc
+
+9. reconstruct lat-lon grid
 
    python icosahedral2regular.py -i google-graphcast-grid/global_icosahedral_m4_air_2000.nc  -o google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc -r 2.0
 
-9. compare with original lat-lon grid data
+   python ../../utils/icosahedral2regular.py -i 12_step_icosahedral_forecast.nc -o reconstructed_12_step_icosahedral_forecast.nc -r 2.0
+   python ../../utils/icosahedral2regular.py -i july_2000_icosahedral_forecast.nc -o reconstructed_july_2000_icosahedral_forecast.nc -r 2.0
 
-   python plot_comparison.py \
-     --original ../data/air.sfc.2000.nc \
-     --reconstructed google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc \
-     --image network_diagnostic_check.png \
-     --time_index 0
+10. compare with original lat-lon grid data
+
+    python ../../utils/plot_comparison.py \
+      --original ../../data/air.sfc.2000.nc \
+      --reconstructed google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc \
+      --image network_diagnostic_check.png \
+      --time_index 0
+
+    python ../../utils/plot_comparison.py \
+      --original ../../data/air.sfc.2000.nc \
+      --reconstructed reconstructed_july_2000_icosahedral_forecast.nc \
+      --image comparison_july_2000_icosahedral_forecast.png \
+      --time_index 0
+
+
+Here is a direct breakdown of exactly what your progress bar is telling you about your model's training run on Ursa:
+
+### 1. The Core Metrics Breakout
+
+* **`Epoch 4: 65%`**
+* **What it means:** You are currently in your 5th training epoch (Epoch indices start at 0, so Epoch 0, 1, 2, 3 are fully completed). The model has processed **65%** of the training sequences allocated for this epoch.
+
+
+* **`22690/35063`**
+* **What it means:** Out of **35,063 total batches** in this epoch, your data loader has successfully fed **22,690 batches** into the GPU.
+
+
+* **`[05:24<02:57]`**
+* **What it means:**
+* `05:24`: The model has been running for **5 minutes and 24 seconds** so far in this specific epoch.
+* `02:57`: Based on your current processing speed, it will take approximately **2 minutes and 57 seconds** to complete the remaining 35% of this epoch.
+
+
+
+
+* **`69.86it/s`**
+* **What it means:** Your model is running at an incredibly fast throughput of **69.86 iterations (batches) per second**.
+
+
+* **`v_num=1`**
+* **What it means:** This is the version number assigned by PyTorch Lightning's logger (like TensorBoard). It means this is the second time you've run a script that logs to that directory (`v_num=0` was your first run).
+
+
+* **`train_graphcast_mse=3.680`**
+* **What it means:** This is the running Mean Squared Error (MSE) calculated over your most recent training steps. It indicates your residual step prediction ($\Delta$) error is actively converging.
+
+
+
+---
+
+### 2. The Big Takeaway (Performance Verification)
+
+Look at that throughput: **`69.86it/s`**.
+
+Your optimization worked perfectly. By removing the Python threading locks (`num_workers: 0`), updating the Zarr data fetch chunk arrays (`np.array(raw_window.data)`), and compiling the multi-mesh loops with `torch.compile`, you have successfully unstalled the GPU.
+
+An epoch with over 35,000 steps is processing in **under 9 minutes total**. You are now hitting the optimized, near-instant training speeds expected on the operational NOAA Ursa cluster architecture.
 

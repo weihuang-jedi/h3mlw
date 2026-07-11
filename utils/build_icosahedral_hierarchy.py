@@ -3,14 +3,16 @@ import os
 import numpy as np
 import torch
 
-class IcosahedralHierarchyBuilder:
+class AdvancedIcosahedralHierarchyBuilder:
     """
-    Generates a multi-scale GraphCast-style hierarchical mesh topology pipeline,
-    compiling horizontal mixing graphs and vertical cross-tier bipartite maps from M0 to Mk.
+    Generates a multi-scale hierarchical mesh topology pipeline,
+    compiling all horizontal edge layouts and custom cross-tier 
+    bipartite maps (including requested skip-level pools).
     """
     def __init__(self, max_level: int = 4, output_dir: str = "."):
         self.max_level = max_level
         self.output_dir = output_dir
+        self.node_counts_by_level = {}
 
     def _get_base_icosahedron(self):
         phi = (1 + np.sqrt(5)) / 2
@@ -30,9 +32,7 @@ class IcosahedralHierarchyBuilder:
         return vertices, faces
 
     def _compile_horizontal_edges(self, faces: np.ndarray) -> torch.Tensor:
-        """Extracts unique directed graph edges from a set of triangular faces."""
-        edges_src = []
-        edges_dst = []
+        edges_src, edges_dst = [], []
         for face in faces:
             n0, n1, n2 = face[0], face[1], face[2]
             edges_src.extend([n0, n1, n1, n2, n2, n0])
@@ -41,20 +41,19 @@ class IcosahedralHierarchyBuilder:
         unique_edges = np.unique(edge_stack, axis=1)
         return torch.from_numpy(unique_edges).long()
 
-    def compile_hierarchy(self):
+    def compile_hierarchy(self, requested_cross_pairs: list):
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Initialize arrays with the base M0 state
         vertices, faces = self._get_base_icosahedron()
         
         print(f"[STAGE 1] Compiling horizontal components for Root Layer M0...")
         edge_index_m0 = self._compile_horizontal_edges(faces)
         torch.save(edge_index_m0, os.path.join(self.output_dir, "edge_index_m0.pt"))
+        self.node_counts_by_level[0] = len(vertices)
         
-        # Track past counts for vertical binding loops
         prev_num_nodes = len(vertices)
 
-        # Loop through each refinement level step-by-step
+        # 1. Run main generation and standard sequential links
         for level in range(1, self.max_level + 1):
             print(f"\n[STAGE 2] Processing Subdivision Layer: M{level-1} -> M{level}...")
             new_faces = []
@@ -88,16 +87,13 @@ class IcosahedralHierarchyBuilder:
             vertices = np.array(verts_list)
             faces = np.array(new_faces, dtype=np.int32)
             current_num_nodes = len(vertices)
+            self.node_counts_by_level[level] = current_num_nodes
 
-            # 1. Compile and save active horizontal layer edges
-            print(f" -> Saving horizontal mixing edge index for M{level}...")
+            # Save active horizontal layer edges
             edge_index = self._compile_horizontal_edges(faces)
             torch.save(edge_index, os.path.join(self.output_dir, f"edge_index_m{level}.pt"))
 
-            # 2. Compile and save vertical bipartite pooling map.
-            # Due to the nested construction property, each parent index maps directly 
-            # to an identical index value in the child layer.
-            print(f" -> Compiling vertical mapping links: M{level-1} -> M{level}...")
+            # Save default consecutive mappings (e.g., map_m0_to_m1.pt)
             map_src = list(range(prev_num_nodes))
             map_dst = list(range(prev_num_nodes))
             bipartite_map = torch.tensor([map_src, map_dst], dtype=torch.long)
@@ -105,17 +101,44 @@ class IcosahedralHierarchyBuilder:
 
             prev_num_nodes = current_num_nodes
 
-        print(f"\nSUCCESS: Icosahedral hierarchy graphs saved to '{self.output_dir}'!")
+        # =================================================================
+        # NEW FEATURE: GENERATING CHOSEN SKIP-RESOLUTION LINKS
+        # =================================================================
+        print(f"\n[STAGE 3] Building cross-tier requested mapping arrays...")
+        for x, y in requested_cross_pairs:
+            if x >= y or x not in self.node_counts_by_level or y not in self.node_counts_by_level:
+                print(f" -> Skipping invalid target pair request: M{x} to M{y}")
+                continue
+            
+            # The first N nodes of level Y correspond precisely to all nodes of level X
+            coarse_node_count = self.node_counts_by_level[x]
+            map_src = list(range(coarse_node_count))
+            map_dst = list(range(coarse_node_count))
+            
+            bipartite_skip_map = torch.tensor([map_src, map_dst], dtype=torch.long)
+            out_filename = f"map_m{x}_to_m{y}.pt"
+            torch.save(bipartite_skip_map, os.path.join(self.output_dir, out_filename))
+            print(f" -> Generated skip connection: {out_filename} (Bipartite Mapping Nodes: {coarse_node_count:,})")
+
+        print(f"\nSUCCESS: Modular Icosahedral Graph Engine compiled inside '{self.output_dir}'!\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Compile nested multi-scale graphs across icosahedral grid steps.")
-    parser.add_argument("-k", "--max_level", type=int, default=4, help="Maximum target resolution scale level (default: 4)")
-    parser.add_argument("-o", "--output_dir", default=".", help="Target output workspace directory for PT tensor blocks")
+    parser = argparse.ArgumentParser(description="Compile customizable multi-scale graphs across icosahedral grid steps.")
+    parser.add_argument("-k", "--max_level", type=int, default=4, help="Maximum target resolution scale level")
+    parser.add_argument("-o", "--output_dir", default=".", help="Target output workspace directory for PT tensors")
     args = parser.parse_args()
 
-    builder = IcosahedralHierarchyBuilder(max_level=args.max_level, output_dir=args.output_dir)
-    builder.compile_hierarchy()
+    # Declare the customized non-adjacent level combinations requested
+    custom_skip_pairs = [
+        (0, 1), (0, 2), (0, 3), (0, 4),  # X=0 paired with Y=[2,3,4]
+        (1, 2), (1, 3), (1, 4),  # X=1 paired with Y=[2,3,4]
+        (2, 3), (2, 4),
+        (3, 4)
+    ]
+    # Filter out identity pairings like (2,2) automatically inside execution loop
+
+    builder = AdvancedIcosahedralHierarchyBuilder(max_level=args.max_level, output_dir=args.output_dir)
+    builder.compile_hierarchy(requested_cross_pairs=custom_skip_pairs)
 
 if __name__ == "__main__":
     main()
-

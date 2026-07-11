@@ -1,0 +1,12 @@
+# config_inference.yaml
+paths:
+  # Route the source path away from the 24-year archive to your new 2026 initialization file
+  zarr_store: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid/global_icosahedral_m4_air_2000.nc"
+  graph_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid"
+
+model_params:
+  hierarchy_levels: [4, 2, 0]
+  history_steps: 2
+  latent_dim: 128
+  processor_layers: 4
+  learning_rate: 0.0002
