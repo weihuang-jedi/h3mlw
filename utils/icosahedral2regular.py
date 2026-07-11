@@ -2,49 +2,48 @@ import argparse
 import os
 import xarray as xr
 import numpy as np
-import torch
 from scipy.spatial import cKDTree
 
 class IcosahedralToRegularInterpolator:
     """
-    An object-oriented transformation module that reconstructs standard 2D regular 
-    latitude-longitude NetCDF fields from unstructured 1D GraphCast-style 
-    icosahedral mesh sequence predictions.
+    Transforms unstructured 1D GraphCast mesh projections back into conformed
+    2D regular lat/lon fields matching an operational template footprint.
     """
-    def __init__(self, input_preds_path: str, output_path: str, target_resolution: float = 1.0):
-        """
-        Args:
-            input_preds_path (str): Path to your compiled icosahedral weather history or prediction Zarr/NetCDF file
-            output_path (str): Target path for the output regular grid NetCDF file
-            target_resolution (float): Spacing of the target regular lat/lon grid in degrees (default: 1.0)
-        """
+    def __init__(self, input_preds_path: str, output_path: str, target_resolution: float = 1.0, template_path: str = None):
         self.input_preds_path = input_preds_path
         self.output_path = output_path
         self.res = target_resolution
+        self.template_path = template_path
         
         self.ds_src = None
         self.var_name = None
         self.grid_lons = None
         self.grid_lats = None
+        self.lon_name = 'longitude'
+        self.lat_name = 'latitude'
 
     def build_target_latlon_matrix(self):
-        """Generates the coordinate arrays for the regular destination grid."""
-        print(f"[STAGE 1] Creating target regular grid layout at resolution: {self.res}°...")
-        # Ascending layout matching standard meteorological conventions
-        self.grid_lats = np.arange(-90.0, 90.0 + self.res, self.res)
-        self.grid_lons = np.arange(0.0, 360.0, self.res)
-        print(f" -> Grid Matrix Footprint Dimensions: ({len(self.grid_lats)} lats x {len(self.grid_lons)} lons)")
+        """Generates or imports the target grid coordinate arrays."""
+        if self.template_path and os.path.exists(self.template_path):
+            print(f"[STAGE 1] Extracting template grid layout dimensions from: {self.template_path}")
+            with xr.open_dataset(self.template_path) as ds_temp:
+                self.lat_name = 'lat' if 'lat' in ds_temp.coords else 'latitude'
+                self.lon_name = 'lon' if 'lon' in ds_temp.coords else 'longitude'
+                self.grid_lats = ds_temp[self.lat_name].values
+                self.grid_lons = ds_temp[self.lon_name].values
+            print(f" -> Imported Template Footprint: ({len(self.grid_lats)} lats x {len(self.grid_lons)} lons)")
+        else:
+            print(f"[STAGE 1] Creating standard uniform grid layout at resolution: {self.res}°...")
+            self.grid_lats = np.arange(-90.0, 90.0 + self.res, self.res)
+            self.grid_lons = np.arange(0.0, 360.0, self.res)
+            self.lat_name, self.lon_name = 'latitude', 'longitude'
+            print(f" -> Generic Grid Footprint: ({len(self.grid_lats)} lats x {len(self.grid_lons)} lons)")
 
     def load_unstructured_source(self):
-        """Opens the source file and discovers the active weather variable payload."""
         print(f"[STAGE 2] Loading unstructured icosahedral dataset: {self.input_preds_path}")
-        if self.input_preds_path.endswith('.zarr') or os.path.isdir(self.input_preds_path):
-            self.ds_src = xr.open_zarr(self.input_preds_path, consolidated=True)
-        else:
-            self.ds_src = xr.open_dataset(self.input_preds_path)
+        self.ds_src = xr.open_dataset(self.input_preds_path)
 
-        # Discovers variable payload name automatically while bypassing static geographic variables
-        ignore_keys = {"land_sea_mask", "elevation", "longitude", "latitude", "face_nodes", "x_cartesian", "y_cartesian", "z_cartesian", "icosahedral_mesh"}
+        ignore_keys = {"land_sea_mask", "elevation", "longitude", "latitude", "face_nodes", "x_cartesian", "y_cartesian", "z_cartesian", "icosahedral_mesh", "time", "node", "face", "three"}
         payload_vars = list(set(self.ds_src.data_vars.keys()) - ignore_keys)
         if not payload_vars:
             raise KeyError("Could not isolate an active weather variable payload in the input file.")
@@ -53,15 +52,10 @@ class IcosahedralToRegularInterpolator:
         print(f" -> Detected target weather variable: '{self.var_name}'")
 
     def compile_spatial_lookup_table(self) -> np.ndarray:
-        """
-        Builds a 3D Cartesian KD-Tree over the icosahedral nodes to find the
-        nearest node index for every pixel on the regular grid without meridian distortion.
-        """
         print("[STAGE 3] Building 3D Cartesian KD-Tree over icosahedral nodes...")
         mesh_lons = self.ds_src['longitude'].values
         mesh_lats = self.ds_src['latitude'].values
 
-        # Convert 1D icosahedral coordinates to 3D Cartesian coordinates to prevent 180/-180 meridian wrap errors
         mesh_lon_rad = np.radians(np.mod(mesh_lons, 360))
         mesh_lat_rad = np.radians(mesh_lats)
         m_x = np.cos(mesh_lat_rad) * np.cos(mesh_lon_rad)
@@ -69,14 +63,12 @@ class IcosahedralToRegularInterpolator:
         m_z = np.sin(mesh_lat_rad)
         mesh_cartesian = np.column_stack((m_x, m_y, m_z))
 
-        # Build lookup tree
         tree = cKDTree(mesh_cartesian)
 
-        # Generate 2D flat coordinates for the regular target grid mesh
+        # Build mesh grid matching coordinate mapping variables
         lon_mesh, lat_mesh = np.meshgrid(self.grid_lons, self.grid_lats)
         
-        # Convert the regular grid mesh coordinates to 3D Cartesian coordinates
-        grid_lon_rad = np.radians(lon_mesh.ravel())
+        grid_lon_rad = np.radians(np.mod(lon_mesh.ravel(), 360))
         grid_lat_rad = np.radians(lat_mesh.ravel())
         g_x = np.cos(grid_lat_rad) * np.cos(grid_lon_rad)
         g_y = np.cos(grid_lat_rad) * np.sin(grid_lon_rad)
@@ -85,78 +77,67 @@ class IcosahedralToRegularInterpolator:
 
         print(" -> Querying spatial indexes to connect grid elements...")
         _, closest_node_indices = tree.query(grid_cartesian, k=1)
-        
-        # Reshape the flat 1D indices back into the original 2D (lat, lon) target grid shape
         return closest_node_indices.reshape(lon_mesh.shape)
 
     def execute_reprojection(self) -> None:
-        """Executes the spatial mapping loop over the timeline and writes the regular NetCDF file."""
         self.build_target_latlon_matrix()
         self.load_unstructured_source()
         
-        # Compile index translation array
         lookup_matrix = self.compile_spatial_lookup_table()
 
         print(f"[STAGE 4] Mapping {len(self.ds_src.time)} timesteps to the 2D regular grid layout...")
-        
-        # Pull the 1D unstructured data payload block into memory
-        raw_payload = self.ds_src[self.var_name].values  # Shape: [time, node]
-        
-        # Vectorized array indexing maps all nodes to the 2D regular grid instantly
-        reprojected_data = raw_payload[:, lookup_matrix]  # Shape: [time, lat, lon]
+        raw_payload = self.ds_src[self.var_name].values
+        reprojected_data = raw_payload[:, lookup_matrix]
 
         print("[STAGE 5] Packaging outputs into standard CF-compliant NetCDF dataset...")
+        
+        # Strip suffix to match verification script assumptions
+        clean_var_name = self.var_name.replace("_icosahedral_forecast", "").replace("_forecast", "")
+        
         ds_regular = xr.Dataset(
             data_vars={
-                self.var_name.replace("_icosahedral", ""): (
-                    ["time", "latitude", "longitude"],
+                clean_var_name: (
+                    ["time", self.lat_name, self.lon_name],
                     reprojected_data.astype(np.float32),
                     {
-                        "units": self.ds_src[self.var_name].attrs.get("units", "unknown"),
-                        "long_name": f"Regular Grid Reconstructed {self.var_name.upper()}"
+                        "units": self.ds_src[self.var_name].attrs.get("units", "degK"),
+                        "long_name": f"Regular Grid Reconstructed {clean_var_name.upper()}"
                     }
                 )
             },
             coords={
                 "time": self.ds_src.time.values,
-                "latitude": self.grid_lats,
-                "longitude": self.grid_lons
+                self.lat_name: self.grid_lats,
+                self.lon_name: self.grid_lons
             },
             attrs={
-                "title": f"Regular Grid Reconstructed Climate Field (Variable: {self.var_name.upper()})",
-                "horizontal_resolution": f"{self.res} degrees",
+                "title": "Regular Grid Reconstructed Climate Field",
                 "conventions": "CF-1.6"
             }
         )
 
-        print(f"[SAVE] Serializing regular grid file to target destination: {self.output_path}")
+        print(f"[SAVE] Serializing conformed regular grid file to: {self.output_path}")
         ds_regular.to_netcdf(self.output_path, format="NETCDF4")
         
         self.ds_src.close()
         ds_regular.close()
-        print("SUCCESS: Interpolation pipeline finished successfully!\n")
+        print("SUCCESS: Interpolation footprint conformed successfully!\n")
 
 
-# =====================================================================
-# SCRIPT CONTROLLER INTERFACE
-# =====================================================================
 def main():
-    parser = argparse.ArgumentParser(
-        description="Transform 1D Unstructured predictions back to standard 2D NetCDF Regular Grids."
-    )
-    parser.add_argument("-i", "--input", required=True, 
-                        help="Path to input unstructured icosahedral prediction file (.nc or .zarr)")
-    parser.add_argument("-o", "--output", required=True, 
-                        help="Destination output path for your 2D regular file (.nc)")
-    parser.add_argument("-r", "--resolution", type=float, default=1.0, 
-                        help="Target regular grid resolution spacing in degrees (default: 1.0)")
+    parser = argparse.ArgumentParser(description="Transform icosahedral variables back to match target grid shapes.")
+    parser.add_argument("-i", "--input", required=True, help="Input unstructured file")
+    parser.add_argument("-o", "--output", required=True, help="Output regular file")
+    parser.add_argument("-r", "--resolution", type=float, default=1.0, help="Fallback generic resolution")
+    parser.add_argument("-t", "--template", default=None, help="Path to ground truth template file to extract dimensions from")
 
     args = parser.parse_args()
 
     interpolator = IcosahedralToRegularInterpolator(
         input_preds_path=args.input,
         output_path=args.output,
-        target_resolution=args.resolution
+        target_resolution=args.resolution,
+        template_path=args.template
     )
     interpolator.execute_reprojection()
 

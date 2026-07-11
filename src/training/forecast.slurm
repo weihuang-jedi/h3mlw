@@ -23,16 +23,5 @@ mamba activate anemoi
 
 cd /scratch4/NAGAPE/epic/Wei.Huang/src/h3/src/training
 
-python run_forecast.py \
-  --config config_inference.yaml \
-  --weights checkpoints/epoch14-ckpt \
-  --start_time "2000-07-01T00:00:00" \
-  --steps 12 \
-  --output july_2000_icosahedral_forecast.nc
+python run_forecast.py --config config_inference.yaml
 
-#python run_forecast.py \
-#  --config config_inference.yaml \
-#  --weights checkpoints/epoch14-ckpt \
-#  --start_time "2020-07-10T00:00:00" \
-#  --steps 24 \
-#  --output july_2000_unstructured_forecast.nc

@@ -46,26 +46,67 @@
 
    python run_forecast.py --config config_inference.yaml --weights checkpoints/epoch14-ckpt --start_time 2000-07-01T00:00:00 --steps 12 --output july_2000_icosahedral_forecast.nc
 
+
+   8.1 extract data from a file:
+
+       python extract_initialization_window.py \
+  	   --input google-graphcast-grid/global_icosahedral_m4_air_2000.nc \
+  	   --output init_20000701T00.nc \
+  	   --start_time "2000-06-30T21:00:00"
+
+       python extract_initialization_window.py \
+  	   --input google-graphcast-grid/global_icosahedral_m4_air_2000.nc \
+  	   --output google-graphcast-grid/init_20000701T06.nc \
+  	   --start_time "2000-07-01T03:00:00"
+
+   8.2 extract regular data
+
+       python extract_regular_window.py \
+         --input ../data/air.sfc.2000.nc \
+         --output regular_init_20000701T00.nc \
+         --start_time "2000-07-01T00:00:00"
+
+   8.3 evaluation
+
+       python ../../utils/evaluate_acc.py -t ../../utils/google-graphcast-grid/global_icosahedral_m4_air_2000.nc -p icosahedral_forecast_20000701T00.nc
+
+Calculating Diurnal-Corrected Anomaly Correlation Coefficient (ACC) step drift...
+===================================================================================================================
+Lead Time       | Forecast Frame (UTC)      | Ground Truth Frame (UTC)  | ACC
+===================================================================================================================
++03 Hours       | 2000-07-01 03:00:00       | 2000-07-01 03:00:00       | 0.4964
++06 Hours       | 2000-07-01 06:00:00       | 2000-07-01 06:00:00       | 0.2352
++09 Hours       | 2000-07-01 09:00:00       | 2000-07-01 09:00:00       | 0.1180
++12 Hours       | 2000-07-01 12:00:00       | 2000-07-01 12:00:00       | 0.0764
++15 Hours       | 2000-07-01 15:00:00       | 2000-07-01 15:00:00       | 0.0000
++18 Hours       | 2000-07-01 18:00:00       | 2000-07-01 18:00:00       | 0.0000
++21 Hours       | 2000-07-01 21:00:00       | 2000-07-01 21:00:00       | 0.0000
++24 Hours       | 2000-07-02 00:00:00       | 2000-07-02 00:00:00       | 0.0000
++27 Hours       | 2000-07-02 03:00:00       | 2000-07-02 03:00:00       | -0.3473
++30 Hours       | 2000-07-02 06:00:00       | 2000-07-02 06:00:00       | -0.1837
++33 Hours       | 2000-07-02 09:00:00       | 2000-07-02 09:00:00       | -0.0806
++36 Hours       | 2000-07-02 12:00:00       | 2000-07-02 12:00:00       | -0.0499
+
+   python ../../utils/evaluate_acc.py -t ../../data/air.sfc.2000.nc -p reconstructed_forecast_20000701T00.nc
+
 9. reconstruct lat-lon grid
 
    python icosahedral2regular.py -i google-graphcast-grid/global_icosahedral_m4_air_2000.nc  -o google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc -r 2.0
 
    python ../../utils/icosahedral2regular.py -i 12_step_icosahedral_forecast.nc -o reconstructed_12_step_icosahedral_forecast.nc -r 2.0
-   python ../../utils/icosahedral2regular.py -i july_2000_icosahedral_forecast.nc -o reconstructed_july_2000_icosahedral_forecast.nc -r 2.0
+
+   python ../../utils/icosahedral2regular.py \
+      -i icosahedral_forecast_20000701T00.nc \
+      -o reconstructed_forecast_20000701T00.nc \
+      --template ../../data/air.sfc.2000.nc
 
 10. compare with original lat-lon grid data
 
     python ../../utils/plot_comparison.py \
-      --original ../../data/air.sfc.2000.nc \
-      --reconstructed google-graphcast-grid/reconstruct_global_icosahedral_m4_air_2000.nc \
-      --image network_diagnostic_check.png \
-      --time_index 0
-
-    python ../../utils/plot_comparison.py \
-      --original ../../data/air.sfc.2000.nc \
-      --reconstructed reconstructed_july_2000_icosahedral_forecast.nc \
-      --image comparison_july_2000_icosahedral_forecast.png \
-      --time_index 0
+       --original ../../utils/regular_init_20000701T00.nc \
+       --reconstructed reconstructed_forecast_20000701T00.nc \
+       --image comparison_july_2000_icosahedral_forecast.png \
+       --time_index 0
 
 
 Here is a direct breakdown of exactly what your progress bar is telling you about your model's training run on Ursa:

@@ -1,7 +1,6 @@
-# config_inference.yaml
 paths:
-  # Route the source path away from the 24-year archive to your new 2026 initialization file
-  zarr_store: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid/global_icosahedral_m4_air_2000.nc"
+  # renamed from zarr_store to match your specification
+  initial_condition: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid/init_20000701T00.nc"
   graph_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/h3/utils/google-graphcast-grid"
 
 model_params:
@@ -10,3 +9,9 @@ model_params:
   latent_dim: 128
   processor_layers: 4
   learning_rate: 0.0002
+
+inference_params:
+  weights: "checkpoints/epoch14-ckpt"
+  start_time: "2000-07-01T00:00:00"
+  steps: 12
+  output: "icosahedral_forecast_20000701T00.nc"

@@ -36,14 +36,29 @@ class H3AccuracyEvaluator:
 
         true_key = 'air_h3' if 'air_h3' in self.ds_true else self.varname
 
-        # Enforce strict coordinate spatial sorting to resolve potential node mismatches
-        if 'h3_index' in self.ds_true.dims and 'h3_index' in self.ds_pred.dims:
-            if not np.array_equal(self.ds_true.h3_index.values, self.ds_pred.h3_index.values):
-                self.ds_true = self.ds_true.sortby('h3_index')
-                self.ds_pred = self.ds_pred.sortby('h3_index')
+        # -----------------------------------------------------------------
+        # FIXED: Dynamic variable discovery to handle any suffix structure
+        # -----------------------------------------------------------------
+        ignore_keys = {"land_sea_mask", "elevation", "face_nodes", "x_cartesian", 
+                       "y_cartesian", "z_cartesian", "longitude", "latitude", 
+                       "time", "node", "face", "three", "icosahedral_mesh"}
+        
+        # Discover the real active payload keys
+        true_payloads = list(set(self.ds_true.data_vars.keys()) - ignore_keys)
+        pred_payloads = list(set(self.ds_pred.data_vars.keys()) - ignore_keys)
+        
+        if not true_payloads or not pred_payloads:
+            raise KeyError("Could not isolate a weather payload variable in one of your NetCDF files.")
+            
+        true_key = true_payloads[0]
+        pred_key = pred_payloads[0]
+        
+        print(f" -> Mapping True Variable Core: '{true_key}'")
+        print(f" -> Mapping Predicted Variable Core: '{pred_key}'")
 
+        # Slice matching timestamps across arrays dynamically using the discovered keys
         true_ds_sliced = self.ds_true[true_key].sel(time=self.matching_times)
-        pred_ds_sliced = self.ds_pred[self.varname].sel(time=self.matching_times)
+        pred_ds_sliced = self.ds_pred[pred_key].sel(time=self.matching_times)
 
         # Convert times to a pandas DatetimeIndex to easily extract diurnal hours
         pd_times = pd.to_datetime(self.matching_times)
